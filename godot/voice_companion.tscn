@@ -1,0 +1,99 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/ai/voice_companion.gd" id="1_script"]
+
+[sub_resource type="StyleBoxFlat" id="Style_panel"]
+bg_color = Color(0.035, 0.045, 0.065, 0.90)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.25, 0.42, 0.62, 0.70)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+shadow_color = Color(0, 0, 0, 0.38)
+shadow_size = 8
+
+[node name="VoiceCompanion" type="CanvasLayer"]
+layer = 60
+script = ExtResource("1_script")
+
+[node name="Panel" type="PanelContainer" parent="."]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 22.0
+offset_top = -220.0
+offset_right = 522.0
+offset_bottom = -22.0
+theme_override_styles/panel = SubResource("Style_panel")
+
+[node name="Margin" type="MarginContainer" parent="Panel"]
+theme_override_constants/margin_left = 18
+theme_override_constants/margin_top = 14
+theme_override_constants/margin_right = 18
+theme_override_constants/margin_bottom = 14
+
+[node name="VBox" type="VBoxContainer" parent="Panel/Margin"]
+theme_override_constants/separation = 8
+
+[node name="Header" type="HBoxContainer" parent="Panel/Margin/VBox"]
+theme_override_constants/separation = 9
+
+[node name="Robot" type="Label" parent="Panel/Margin/VBox/Header"]
+theme_override_colors/font_color = Color(0.52, 0.82, 1, 1)
+theme_override_font_sizes/font_size = 20
+text = "◉ 小柒"
+
+[node name="StatusDot" type="ColorRect" parent="Panel/Margin/VBox/Header"]
+custom_minimum_size = Vector2(9, 9)
+layout_mode = 2
+size_flags_vertical = 4
+color = Color(0.95, 0.72, 0.25, 1)
+
+[node name="Status" type="Label" parent="Panel/Margin/VBox/Header"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.72, 0.78, 0.86, 1)
+theme_override_font_sizes/font_size = 15
+text = "正在连接本地语音…"
+
+[node name="Separator" type="HSeparator" parent="Panel/Margin/VBox"]
+layout_mode = 2
+
+[node name="UserText" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.78, 0.84, 0.94, 1)
+theme_override_font_sizes/font_size = 16
+text = "你：直接对着麦克风说话"
+autowrap_mode = 2
+text_overrun_behavior = 3
+
+[node name="AssistantText" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.48, 0.84, 1, 1)
+theme_override_font_sizes/font_size = 16
+text = "小柒：我在这里。"
+autowrap_mode = 2
+text_overrun_behavior = 3
+
+[node name="Hint" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+size_flags_vertical = 8
+theme_override_colors/font_color = Color(0.48, 0.52, 0.60, 1)
+theme_override_font_sizes/font_size = 13
+text = "自动断句 · V 暂停/继续语音"
+
+[node name="HealthRequest" type="HTTPRequest" parent="."]
+timeout = 5.0
+
+[node name="EventsRequest" type="HTTPRequest" parent="."]
+timeout = 3.0
+
+[node name="ControlRequest" type="HTTPRequest" parent="."]
+timeout = 5.0
+
+[node name="PollTimer" type="Timer" parent="."]
+wait_time = 0.15
+

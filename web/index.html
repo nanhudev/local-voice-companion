@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>小柒 · 本地语音调试台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="identity">
+        <div class="robot-face"><i></i><i></i></div>
+        <div><h1>小柒</h1><p>本地语音调试台</p></div>
+      </div>
+      <div class="connection"><span id="connectionDot"></span><b id="connectionText">连接中</b></div>
+    </header>
+
+    <section class="workspace">
+      <article class="conversation card">
+        <div class="card-title">
+          <div><span class="eyebrow">LIVE SESSION</span><h2>实时对话</h2></div>
+          <button id="micButton" class="mic active"><span class="mic-icon"></span><span id="micText">暂停聆听</span></button>
+        </div>
+        <div class="state-line"><span id="statePulse"></span><span id="stateText">正在启动模型…</span></div>
+        <div id="messages" class="messages">
+          <div class="empty" id="emptyState"><div class="wave"><i></i><i></i><i></i><i></i><i></i></div><p>直接对着麦克风说话</p><small>自动断句后发送给本地模型</small></div>
+        </div>
+        <form id="textForm" class="text-test">
+          <input id="textInput" autocomplete="off" placeholder="也可以输入文字测试整条 LLM → TTS 链路">
+          <button type="submit">发送</button>
+        </form>
+        <div class="metrics">
+          <span>ASR <b id="asrMetric">—</b></span><span>LLM <b id="llmMetric">—</b></span><span>模式 <b>本地</b></span>
+        </div>
+      </article>
+
+      <aside class="settings card">
+        <div class="card-title compact"><div><span class="eyebrow">RUNTIME</span><h2>模型与声音</h2></div></div>
+        <label>声音声线<select id="voiceSelect"></select></label>
+        <label>对话模型<select id="modelSelect"></select></label>
+        <label>语音识别 / 机器<select id="asrSelect"></select></label>
+        <div class="two-col">
+          <label>TTS 引擎<select id="ttsSelect"></select></label>
+          <label>模型大小<select id="ttsSizeSelect"></select></label>
+        </div>
+        <div id="engineNote" class="note"></div>
+        <label>自定义系统提示词<textarea id="promptInput" rows="5" placeholder="例如：你是一个简洁、友好的聊天伙伴。"></textarea></label>
+        <p class="hint">提示词只影响后续对话，可随时修改。</p>
+        <button id="saveSettings" class="primary">保存并暖机</button>
+        <div class="divider"></div>
+        <dl class="runtime-info">
+          <div><dt>Voicebox</dt><dd>127.0.0.1:17493</dd></div>
+          <div><dt>Ollama</dt><dd>127.0.0.1:11434</dd></div>
+          <div><dt>调试网关</dt><dd>127.0.0.1:17831</dd></div>
+        </dl>
+        <p id="saveResult" class="save-result"></p>
+      </aside>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
