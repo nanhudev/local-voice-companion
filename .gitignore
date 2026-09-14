@@ -5,3 +5,24 @@ config.json
 .env
 *.wav
 *.log
+
+# Agent workspace: session memory, scratch files, local backups. Not part of the
+# project, and must never be published.
+.workbuddy/
+
+# Test / build artefacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local model and data directories. These are large, machine-specific, and
+# deliberately kept off the repository (see docs/ARCHITECTURE.md on data roots).
+.models/
+data/
+.DS_Store
+Thumbs.db
