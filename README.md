@@ -1,19 +1,20 @@
-# Local Voice Companion / 本地语音伙伴
+# Local Voice Companion
 
-一个低延迟、可本地运行的 ASR → LLM → TTS 语音对话网关，提供浏览器控制台、Windows GPU worker 与 Godot 客户端示例。
+English | [简体中文](#简体中文)
 
-A low-latency, local-first ASR → LLM → TTS voice gateway with a browser console, an optional Windows GPU worker, and a Godot client example.
+A local-first voice conversation gateway that connects speech recognition, an LLM, and speech synthesis behind one browser interface. It is designed as a practical starting point for private desktop assistants, game characters, kiosks, and voice-enabled prototypes.
 
-## Highlights / 特性
+## Highlights
 
-- Microphone VAD and streaming turn handling / 麦克风 VAD 与流式轮次处理
-- Local Ollama-compatible LLM integration / 本地 Ollama 兼容模型
-- Local or relay-backed ASR / 本地或中继 ASR
-- Voicebox-compatible TTS and queued playback / Voicebox 兼容 TTS 与队列播放
-- Runtime settings UI and health endpoints / 运行时设置页面与健康检查
-- Godot integration sample / Godot 接入示例
+- Microphone voice activity detection and streaming turn handling
+- Ollama-compatible local language-model integration
+- Pluggable local or relay-backed speech recognition
+- Voicebox-compatible speech synthesis with queued playback
+- Browser-based runtime settings and health checks
+- Optional Windows GPU worker for split-machine setups
+- Minimal Godot integration example
 
-## Quick start / 快速开始
+## Quick start on Windows
 
 ```powershell
 py -m venv .venv
@@ -22,25 +23,32 @@ Copy-Item config.example.json config.json
 .\.venv\Scripts\python app.py
 ```
 
-Run `setup.ps1` once, then `start.ps1`. The setup script creates an isolated Python environment and a local config. Run `doctor.ps1` whenever a backend or microphone is not detected.
+Open `http://127.0.0.1:17831`. For the guided setup, run `setup.ps1` once and use `start.ps1` afterward. Run `doctor.ps1` when a model endpoint, speech service, or microphone is not detected.
 
-Open `http://127.0.0.1:17831`. Configure model, ASR, and TTS endpoints in `config.json`. Remote relay credentials are read from `AI_RELAY_TOKEN`; never commit the token.
+## Backends
 
-打开 `http://127.0.0.1:17831`。在 `config.json` 中配置模型、ASR 与 TTS。远端中继凭据通过 `AI_RELAY_TOKEN` 读取，请勿提交密钥。
+- **LLM:** Ollama or another compatible local endpoint
+- **ASR/TTS:** a Voicebox-compatible service exposing `/health`, `/profiles`, `/transcribe`, and `/generate/stream`
+- **Relay worker:** configured with `AI_RELAY_WS_URL` and `AI_RELAY_TOKEN`
 
-首次运行执行 `setup.ps1`，以后使用 `start.ps1`；后端或麦克风不可用时运行 `doctor.ps1`。
+Copy `config.example.json` to `config.json` and adjust endpoints for your machine. Secrets are read from environment variables; do not commit tokens or machine-specific configuration.
 
-## Requirements / 依赖
+## Requirements
 
-- Windows 10/11 and Python 3.11+
-- Ollama or another compatible local endpoint
-- A Voicebox-compatible service exposing `/health`, `/profiles`, `/transcribe`, and `/generate/stream`
-- A microphone for hands-free mode; text testing works without one
+Windows 10/11, Python 3.11+, and a supported local model or speech backend. A microphone is required only for hands-free voice input; the text interface can be tested without one.
 
-## Worker / Windows 工作节点
+## Project status
 
-`windows_worker.py` supports environment-based configuration: `AI_RELAY_WS_URL`, `AI_RELAY_TOKEN`, `FFMPEG_PATH`, `VOICEBOX_EXE`, and `VOICEBOX_DATA_DIR`.
+The gateway, browser UI, backend discovery, diagnostics, smoke test, and Godot sample are included. Actual speech quality and latency depend on the ASR/TTS models installed on the host machine.
 
 ## License
 
 MIT
+
+## 简体中文
+
+这是一个本地优先的语音对话网关，通过统一的浏览器界面连接语音识别、语言模型和语音合成，可作为私人桌面助手、游戏角色、展台或语音原型的开发起点。
+
+项目支持麦克风 VAD、流式对话、本地 Ollama 模型、可插拔 ASR、Voicebox 兼容 TTS、运行状态检查、Windows GPU 工作节点和 Godot 接入示例。
+
+Windows 首次使用可运行 `setup.ps1`，之后使用 `start.ps1`；后端或麦克风未识别时运行 `doctor.ps1`。打开 `http://127.0.0.1:17831` 即可使用。请从 `config.example.json` 创建本机配置，令牌通过环境变量提供，不要提交私密凭据。
