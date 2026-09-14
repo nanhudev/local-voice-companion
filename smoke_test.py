@@ -11,7 +11,10 @@ import wave
 import requests
 
 
-CONFIG = json.loads(Path(__file__).with_name("config.json").read_text(encoding="utf-8"))
+CONFIG_PATH = Path(__file__).with_name("config.json")
+if not CONFIG_PATH.exists():
+    CONFIG_PATH = Path(__file__).with_name("config.example.json")
+CONFIG = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
 
 def main() -> int:
@@ -20,7 +23,7 @@ def main() -> int:
         CONFIG["voicebox_url"] + "/generate/stream",
         json={
             "profile_id": CONFIG["voice_profile_id"],
-            "text": "你好，我是小柒。",
+            "text": "你好，这是本地语音链路测试。",
             "language": "zh",
             "engine": CONFIG["tts_engine"],
             "model_size": CONFIG["tts_model_size"],

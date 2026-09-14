@@ -75,7 +75,7 @@ func _on_events_completed(_result: int, response_code: int, _headers: PackedStri
 		if event_type == "user":
 			user_label.text = "你：" + text
 		elif event_type in ["assistant", "assistant_partial"]:
-			assistant_label.text = "小柒：" + text
+			assistant_label.text = "助手：" + text
 		elif event_type == "error":
 			_set_status("语音错误：" + event.get("detail", "未知错误"), Color(0.95, 0.30, 0.25))
 		if not state.is_empty():
@@ -101,4 +101,3 @@ func _apply_state(state: String, text: String) -> void:
 func _set_status(text: String, color: Color) -> void:
 	status_label.text = text
 	status_dot.color = color
-

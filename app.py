@@ -37,6 +37,35 @@ def load_config() -> dict:
     return json.loads(source.read_text(encoding="utf-8"))
 
 
+def resolve_available_defaults(config: dict) -> dict:
+    """Select installed defaults when the example placeholders are unavailable."""
+    changed = False
+    session = requests.Session()
+    try:
+        response = session.get(f'{config["ollama_url"].rstrip("/")}/api/tags', timeout=4)
+        response.raise_for_status()
+        names = [item.get("name") for item in response.json().get("models", []) if item.get("name")]
+        if names and config.get("ollama_model") not in names:
+            config["ollama_model"] = names[0]
+            changed = True
+    except requests.RequestException:
+        pass
+    try:
+        response = session.get(f'{config["voicebox_url"].rstrip("/")}/profiles', timeout=4)
+        response.raise_for_status()
+        profiles = [item for item in response.json() if item.get("id")]
+        ids = {item["id"] for item in profiles}
+        if profiles and config.get("voice_profile_id") not in ids:
+            config["voice_profile_id"] = profiles[0]["id"]
+            config["voice_profile_name"] = profiles[0].get("name", "Default")
+            changed = True
+    except requests.RequestException:
+        pass
+    if changed:
+        CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return config
+
+
 def wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
@@ -604,8 +633,14 @@ class ApiHandler(BaseHTTPRequestHandler):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--auto-start", action="store_true", help="start locally installed Ollama and Voicebox backends")
     args = parser.parse_args()
     config = load_config()
+    if args.auto_start:
+        from backends import ensure_backends
+
+        ensure_backends(config)
+    config = resolve_available_defaults(config)
     companion = VoiceCompanion(config)
     if args.probe:
         try:
@@ -614,10 +649,10 @@ def main() -> int:
         except Exception as exc:
             print(f"VOICE_PROBE_FAIL {exc}")
             return 1
-    companion.start()
     ApiHandler.companion = companion
     server = ThreadingHTTPServer((config["listen_host"], int(config["listen_port"])), ApiHandler)
     print(f'VOICE_GATEWAY_READY http://{config["listen_host"]}:{config["listen_port"]}', flush=True)
+    threading.Thread(target=companion.start, name="voice-startup", daemon=True).start()
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:

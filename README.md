@@ -22,9 +22,20 @@ Copy-Item config.example.json config.json
 .\.venv\Scripts\python app.py
 ```
 
+Run `setup.ps1` once, then `start.ps1`. The setup script creates an isolated Python environment and a local config. Run `doctor.ps1` whenever a backend or microphone is not detected.
+
 Open `http://127.0.0.1:17831`. Configure model, ASR, and TTS endpoints in `config.json`. Remote relay credentials are read from `AI_RELAY_TOKEN`; never commit the token.
 
 打开 `http://127.0.0.1:17831`。在 `config.json` 中配置模型、ASR 与 TTS。远端中继凭据通过 `AI_RELAY_TOKEN` 读取，请勿提交密钥。
+
+首次运行执行 `setup.ps1`，以后使用 `start.ps1`；后端或麦克风不可用时运行 `doctor.ps1`。
+
+## Requirements / 依赖
+
+- Windows 10/11 and Python 3.11+
+- Ollama or another compatible local endpoint
+- A Voicebox-compatible service exposing `/health`, `/profiles`, `/transcribe`, and `/generate/stream`
+- A microphone for hands-free mode; text testing works without one
 
 ## Worker / Windows 工作节点
 

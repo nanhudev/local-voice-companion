@@ -13,7 +13,7 @@
   "voice_profile_name": "Default",
   "language": "zh",
   "asr_model": "base",
-  "tts_engine": "voicebox",
+  "tts_engine": "luxtts",
   "tts_model_size": "0.6B",
   "unload_unused_tts_models": true,
   "sample_rate": 16000,
