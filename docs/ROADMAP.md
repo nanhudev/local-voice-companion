@@ -45,6 +45,11 @@ realtime voice does all three concurrently, and the felt difference is large —
 can interrupt mid-sentence and the reply adjusts, you hear a response beginning
 before the model has finished composing, and pauses stop being turn boundaries.
 
+**Feasibility has been assessed — see [DUPLEX_FEASIBILITY.md](DUPLEX_FEASIBILITY.md).**
+The conclusion, in one line: a local full-duplex *model* does not fit on this
+machine (7.2 GB free VRAM against Moshi's 24 GB / PersonaPlex's ~18 GB), but a
+full-duplex *pipeline* over a cascade does, and that is what this phase builds.
+
 The PHASE 1 skeleton was built with this in mind, and the pieces are already
 there:
 
@@ -59,23 +64,28 @@ there:
 What is genuinely missing:
 
 - **A streaming ASR that emits partials continuously** rather than one
-  utterance per turn. The event types (`asr.partial`) exist; no provider emits
+  utterance per turn. The event type (`asr.partial`) exists; no provider emits
   them.
-- **A state that means "speaking while listening"** — currently exclusive.
-- **Full-duplex transport.** The WebSocket surface is half-duplex in practice:
-  audio in during a turn, audio out during playback.
+- **A state that means "speaking while listening"** — currently the ten states
+  are mutually exclusive.
+- **The interaction layer** — one arbitration point deciding whether to keep
+  speaking, whether a pause means the thought finished, and whether to
+  backchannel. Duplex-ness lives here, not in the model.
 - **Acoustic echo handling.** Without it, the runtime transcribes its own voice.
-  A laptop with open speakers will barge itself in continuously — this is the
-  single hardest part of duplex, and it is why "speaker mode" and "headset mode"
-  are different products.
+  The mechanism is browser-native AEC via a WebRTC loopback; headphones are a
+  documented fallback mode, not an equivalent one.
 - **A local model capable of streaming inference at conversational latency on
-  8 GB of VRAM.** Any plan here must be honest about what that budget allows.
+  8 GB of VRAM.** Budgeted at ~3.5–4.5 GB for ASR + a 4B-class quantized LLM,
+  with Piper TTS on CPU.
 
 **Exit criteria:** with a headset, the user can interrupt mid-sentence and the
-runtime responds to the interruption rather than to its own output.
+runtime responds to the interruption rather than to its own output; and a
+measured thinking-pause discrimination rate that beats a silence timer.
 
-**Risk:** echo cancellation is genuinely hard. The fallback plan is headset-only
-duplex, which is honest and useful and should not be described as full duplex.
+**What will not be achieved:** native audio understanding. A cascade flattens
+prosody to text at the STT boundary. A local cascade can feel duplex for
+interruption, overlap and backchannel; it cannot hear like a natively-multimodal
+model. Those are different achievements and this roadmap does not conflate them.
 
 **Committed constraint:** this phase must not weaken the turn-based path. If
 duplex proves infeasible on the target hardware, the turn-based runtime remains

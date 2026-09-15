@@ -38,6 +38,7 @@ exactly like the fake providers used in tests are providers.
 | [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) | Which providers actually run today |
 | [BENCHMARKING.md](docs/BENCHMARKING.md) | How latency is measured, and how it avoids inventing numbers |
 | [ROADMAP.md](docs/ROADMAP.md) | Phases, including realtime duplex voice |
+| [DUPLEX_FEASIBILITY.md](docs/DUPLEX_FEASIBILITY.md) | Whether GPT-style listen-while-speaking can run locally, and what it costs |
 | [SECURITY.md](docs/SECURITY.md) | Threat model and secret handling |
 | [CURRENT_ARCHITECTURE.md](docs/CURRENT_ARCHITECTURE.md) | PHASE 0 audit of the original codebase |
 | [docs/adr/](docs/adr/) | Architecture decision records |
