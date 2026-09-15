@@ -123,6 +123,114 @@ class FakeASR(ASRProvider):
         return f"你好，这是 {int(duration)} 毫秒的测试语音。"
 
 
+class ScriptedStreamingASR(ASRProvider):
+    """A streaming ASR whose hypotheses are written down in advance.
+
+    It exists because "partials are emitted" is not something a test can assert
+    against a deterministic one-shot fake: :class:`FakeASR` has exactly one
+    answer and produces it at the end, which is precisely the behaviour this
+    phase is trying to move away from.
+
+    The stability split is *not* scripted. Hypotheses are fed through the real
+    :class:`~local_voice_companion.core.transcriber.TranscriptStabilityTracker`,
+    so committed/unstable come out of the same rule the sherpa provider uses.
+    Scripting them would let a wrong tracker pass an integration test.
+
+    Options:
+        partials: list[str]   -> hypotheses, one consumed per emitted update
+        partials_per_frame: int -> emit at most one hypothesis every N frames
+        final_transcript: str  -> terminal text (defaults to the last hypothesis)
+    """
+
+    kind = ProviderKind.ASR
+
+    @staticmethod
+    def descriptor() -> ProviderDescriptor:
+        return ProviderDescriptor(
+            id="scripted_streaming_asr",
+            kind=ProviderKind.ASR,
+            display_name="Scripted Streaming ASR (deterministic test provider)",
+            languages=_LANGUAGES,
+            devices=(Device.CPU,),
+            streaming=True,
+            supports_streaming=True,
+            supports_partial_results=True,
+            estimated_ram_mb=1,
+            estimated_vram_mb=0,
+            quality_tier=1,
+            latency_tier=5,
+            quality_score=None,
+            quality_source=QualitySource.UNKNOWN,
+            version="1.0.0",
+            tags=("fake", "test", "ci", "streaming", "partials", "no-download"),
+            models=(
+                ModelRef(
+                    id="scripted-streaming-1",
+                    display_name="Scripted Streaming Model",
+                    languages=_LANGUAGES,
+                ),
+            ),
+        )
+
+    async def load(self, model: str | None = None, device: str = Device.CPU.value) -> None:
+        return await super().load(model, device)
+
+    def _script(self) -> list[str]:
+        raw = self.options.get("partials") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        return [item for item in raw if isinstance(item, str)]
+
+    def _final_text(self, script: list[str]) -> str:
+        configured = self.options.get("final_transcript")
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+        return script[-1] if script else ""
+
+    async def transcribe(
+        self,
+        audio: AudioChunk,
+        *,
+        language: str = "",
+        model: str | None = None,
+        token: CancellationToken | None = None,
+    ) -> str:
+        """Whole-utterance answer: the last hypothesis, i.e. the final text."""
+
+        return self._final_text(self._script())
+
+    async def stream_transcribe(
+        self,
+        frames: AsyncIterator[Any],
+        *,
+        language: str = "",
+        model: str | None = None,
+        token: CancellationToken | None = None,
+    ) -> AsyncIterator[Any]:
+        from ..core.transcriber import TranscriptStabilityTracker
+
+        script = self._script()
+        every = max(1, _option_int(self, "partials_per_frame", 1))
+        tracker = TranscriptStabilityTracker()
+        consumed = 0
+        seen = 0
+
+        async for frame in frames:
+            if token is not None and token.cancelled:
+                return
+            seen += 1
+            if seen % every:
+                continue
+            if consumed >= len(script):
+                continue
+            update = tracker.push(script[consumed])
+            consumed += 1
+            if update is not None:
+                yield update
+
+        yield tracker.finalize(self._final_text(script))
+
+
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------

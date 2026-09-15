@@ -25,12 +25,24 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Iterable
+from typing import Any, AsyncIterator, Iterable, Iterator
 
 from ..pipeline.queue import BoundedQueue
 from .types import AudioChunk
 
-__all__ = ["AudioFrame", "InputAudioStream", "StreamStats", "concat_frames"]
+__all__ = [
+    "AudioFrame",
+    "InputAudioStream",
+    "StreamStats",
+    "concat_frames",
+    "iter_frames",
+]
+
+#: Frame length used when a complete utterance is replayed through the
+#: streaming path. 20 ms is what live capture produces, so replaying at the
+#: same size keeps the two paths comparable instead of introducing a second
+#: variable.
+DEFAULT_FRAME_MS = 20
 
 _perf_counter = time.perf_counter
 
@@ -108,6 +120,40 @@ def concat_frames(frames: Iterable[AudioFrame]) -> AudioChunk:
         sample_width=sample_width,
         is_final=True,
     )
+
+
+def iter_frames(chunk: AudioChunk, frame_ms: int = DEFAULT_FRAME_MS) -> Iterator[AudioFrame]:
+    """Re-slice a complete utterance into stream-shaped frames.
+
+    This exists so that a finished buffer (a REST upload, a wav on disk, a test
+    fixture) can travel the *same* code path as live microphone audio instead of
+    a second, near-identical one. One path is the point: a streaming bug that
+    only reproduces on live audio is a bug nobody can write a test for.
+
+    What it cannot do is fake timing. `captured_at` is stamped when the slice is
+    produced, not when the sound happened, so any Time-To-First-Partial measured
+    on the replay path measures the recogniser alone -- it excludes capture and
+    transport, which only exist in the live path. Callers comparing the two must
+    say which one they are quoting.
+    """
+
+    if frame_ms <= 0:
+        raise ValueError(f"frame_ms must be positive, got {frame_ms}")
+    frame_count = max(1, int(round(chunk.sample_rate * frame_ms / 1000.0)))
+    frame_bytes = frame_count * chunk.channels * chunk.sample_width
+    if frame_bytes <= 0 or not chunk.pcm:
+        return
+    for index, start in enumerate(range(0, len(chunk.pcm), frame_bytes)):
+        end = start + frame_bytes
+        yield AudioFrame(
+            pcm=chunk.pcm[start:end],
+            sample_rate=chunk.sample_rate,
+            channels=chunk.channels,
+            sample_width=chunk.sample_width,
+            sequence=index,
+            captured_at=_perf_counter(),
+            is_final=end >= len(chunk.pcm),
+        )
 
 
 @dataclass

@@ -69,11 +69,10 @@ PYTHONPATH=src .workbuddy/tmp/bench_stream_asr.py --frame-ms 20 --repeats 3
 ### Test state
 
 ```
-253 passed, 9 skipped   (two consecutive runs: 53.0 s / 54.3 s)
+253 passed, 9 skipped   (3A foundation, two consecutive runs: 53.0 s / 54.3 s)
+278 passed,  0 skipped  (after `asr.partial` landed; the 9 skips were Kokoro
+                         weights that had finished downloading, not fixes)
 ```
-
-The 9 skips are all Kokoro weights still downloading. They are skips, not
-passes: on a machine without them there is legitimately no local voice path.
 
 `tests/integration/test_streaming_asr.py` holds 4 `hardware`-marked tests that
 load the real engine. They assert that partials actually arrive, that the
@@ -83,11 +82,39 @@ hypothesis — which is where a naive "committed only grows" tracker gets caught
 
 ---
 
+## 3A (part 2) — `asr.partial` leaves the runtime: DONE
+
+`EventType.ASR_PARTIAL` existed and was emitted by nobody. It now is, on two
+paths, and both are covered by tests that fail if it stops.
+
+| Piece | File | What it does |
+|---|---|---|
+| `transcribe_stream()` | `core/orchestrator.py` | Runs `stream_transcribe()` and publishes every non-final update as `asr.partial`, then exactly one `asr.final` — always, including on cancellation, because a client needs a terminator and not a stream that merely stops. |
+| `iter_frames()` | `core/audio.py` | Re-slices a finished buffer into 20 ms frames so a one-shot upload travels the *same* path as live audio. One path, not a second near-identical one that can drift. |
+| `TurnRequest.frames` | `core/orchestrator.py` | The live-microphone shape. Set it and transcription runs while audio arrives. |
+| `open_input_stream` / `push_audio` / `end_input_stream` | `core/session.py` | The handoff between the websocket that receives frames and the turn task that consumes them. |
+| `audio.start` / `audio.frame` / `audio.end` | `api/app.py` (WS) | The client protocol. Frames arriving before `audio.start` are reported as an error, not silently dropped. |
+| `asr_first_partial` stage | `core/events.py` | New timeline stage plus `asr_ttfp_ms`. Its *absence* is meaningful: it means the turn waited for the whole utterance. |
+| `ScriptedStreamingASR` | `providers/fake.py` | A fake whose hypotheses are scripted, so "partials are emitted" is testable. `FakeASR` cannot fail this test: it knows its only answer up front. |
+
+Two deliberate decisions, both about not lying with numbers:
+
+* **`vad_end` is stamped when capture closes, not when frames run out.** Marking
+  it inside ASR would silently redefine `asr_latency_ms` from "speech end →
+  result" into "last frame dequeued → result".
+* **`asr_ttfp_ms` on the replay path excludes capture and transport.** Frames
+  produced by `iter_frames` are stamped when sliced, not when the sound
+  happened. The live path is the one whose number a user feels; quoting the
+  replay number as if it were live would understate it.
+
+---
+
 ## What is NOT done
 
 | Step | State | Note |
 |---|---|---|
-| 3A — wire `asr.partial` into the API/WS | **NOT STARTED** | `EventType.ASR_PARTIAL` is declared and still **emits nothing**. This is the remaining half of 3A. |
+| 3A — `asr.partial` into the API/WS | **DONE** | Emitted on both the live-frame path and the one-shot buffer path. |
+| 3A — real TTFP measurement with sherpa on live audio | NOT DONE | The 480–800 ms figure above is "audio consumed before first text" from the benchmark, not a websocket round trip. |
 | 3B — barge-in | NOT STARTED | |
 | 3C — duplex arbitration | NOT STARTED | |
 | 3D — AEC | NOT STARTED | Headset first; speaker AEC must not block the phase. |

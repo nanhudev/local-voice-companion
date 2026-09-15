@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from ..bots.schema import BotManifest
+from ..core.audio import InputAudioStream
 from ..core.cancellation import CancellationToken
 from ..core.errors import ConfigurationError
 from ..core.events import Event, EventBus, EventType, TurnTimeline
@@ -47,6 +48,11 @@ class Session:
     last_transcript: str = ""
     last_reply: str = ""
     closed: bool = False
+    #: Live microphone input for the active turn. Owned by the session because
+    #: the websocket that receives frames is not the coroutine that consumes
+    #: them -- the stream is the handoff point between the two.
+    input_stream: InputAudioStream | None = field(default=None, repr=False)
+    _input_sample_rate: int = field(default=16000, repr=False)
 
     @classmethod
     def from_bot(cls, bot: BotManifest, **kwargs: Any) -> "Session":
@@ -122,6 +128,46 @@ class Session:
                 )
         self.active_timeline = None
         self.active_token = None
+        self.input_stream = None
+
+    # -- live audio input --------------------------------------------------
+
+    def open_input_stream(self, sample_rate: int, *, capacity: int = 64) -> InputAudioStream:
+        """Start collecting microphone frames for a streaming turn.
+
+        A second call replaces the stream rather than failing: a client that
+        restarts capture after an error should not have to reason about the
+        previous one's state first.
+        """
+
+        self._input_sample_rate = sample_rate
+        self.input_stream = InputAudioStream(capacity=capacity, name=f"mic-{self.id}")
+        return self.input_stream
+
+    async def push_audio(self, pcm: bytes, sample_rate: int | None = None) -> bool:
+        """Hand one PCM slice to the active turn. False means it was dropped."""
+
+        stream = self.input_stream
+        if stream is None or stream.closed:
+            return False
+        return await stream.put_pcm(pcm, sample_rate or self._input_sample_rate)
+
+    async def end_input_stream(self) -> bool:
+        """Close capture and stamp `vad_end`.
+
+        The mark belongs here, not in the recogniser: the caller is the only
+        place that knows the speaker stopped, and `asr_latency_ms` is defined
+        as speech-end to final-result. Marking it inside ASR would silently
+        redefine that metric as "last frame decoded".
+        """
+
+        stream = self.input_stream
+        if stream is None:
+            return False
+        if self.active_timeline is not None:
+            self.active_timeline.mark("vad_end")
+        await stream.close()
+        return True
 
     def cancel(self, detail: str = "barge-in", code: str = "barge_in") -> bool:
         """Interrupt the active turn. Idempotent and safe to call with none."""
@@ -130,6 +176,11 @@ class Session:
         if token is None or token.cancelled:
             return False
         token.cancel(detail=detail, code=code)
+        # Audio captured before the interruption is no longer about the current
+        # utterance. Draining it stops a stale hypothesis from being built out
+        # of sound the user has already moved past.
+        if self.input_stream is not None:
+            self.input_stream.drain()
         self.bus.emit(
             EventType.TURN_CANCELLED,
             session_id=self.id,

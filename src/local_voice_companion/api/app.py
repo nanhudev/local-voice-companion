@@ -665,6 +665,51 @@ async def _handle_client_message(
         await session.close()
         return
 
+    if kind == "audio.start":
+        # Live capture: the turn starts now and the audio arrives later, one
+        # frame per message. Partials can therefore reach the client while the
+        # speaker is still talking, which the one-shot "audio" frame cannot do.
+        await _ensure_pipeline(app, state)
+        pipeline = state.pipeline
+        assert pipeline is not None
+        if session.active_turn is not None and not session.active_turn.done():
+            session.cancel(detail="barge-in: new user input", code="barge_in")
+
+        sample_rate = int(message.get("sample_rate", app.state.config.audio.sample_rate))
+        stream = session.open_input_stream(sample_rate)
+        request = _build_turn_request(app, session, message, frames=stream.frames())
+        task = asyncio.create_task(run_turn(session, pipeline, request), name=f"turn-{session.id}")
+        session.active_turn = task
+        return
+
+    if kind == "audio.frame":
+        if session.input_stream is None or session.input_stream.closed:
+            session.emit(
+                EventType.ERROR,
+                {"message": "audio.frame before audio.start (open a stream first)"},
+            )
+            return
+        chunk = _decode_audio(message)
+        if not chunk.pcm:
+            session.emit(EventType.ERROR, {"message": "audio.frame carries no audio"})
+            return
+        accepted = await session.push_audio(chunk.pcm, chunk.sample_rate)
+        if not accepted:
+            # Backpressure dropped this frame. Counting it is the difference
+            # between a lossy stream and a silently wrong transcript.
+            session.emit(
+                EventType.RUNTIME_METRIC,
+                {"metric": "audio_frame_dropped", "value_ms": 0},
+            )
+        return
+
+    if kind == "audio.end":
+        if not await session.end_input_stream():
+            session.emit(
+                EventType.ERROR, {"message": "audio.end without an open audio stream"}
+            )
+        return
+
     if kind in {"text", "audio"}:
         await _ensure_pipeline(app, state)
         pipeline = state.pipeline
@@ -672,18 +717,12 @@ async def _handle_client_message(
         if session.active_turn is not None and not session.active_turn.done():
             session.cancel(detail="barge-in: new user input", code="barge_in")
 
-        bot = app.state.bots.get(session.bot_id) if session.bot_id else None
-        request = TurnRequest(
+        request = _build_turn_request(
+            app,
+            session,
+            message,
             text=str(message.get("text", "")) if kind == "text" else "",
             audio=_decode_audio(message) if kind == "audio" else None,
-            speak=bool(message.get("speak", True)),
-            language=str(message.get("language") or session.language),
-            system_prompt=bot.persona.system_prompt if bot else "",
-            voice=bot.tts.voice if bot else None,
-            max_tokens=bot.conversation.max_tokens if bot else app.state.config.pipeline.max_tokens,
-            temperature=bot.conversation.temperature if bot else app.state.config.pipeline.temperature,
-            chunk_min_chars=app.state.config.pipeline.chunk_min_chars,
-            chunk_max_chars=app.state.config.pipeline.chunk_max_chars,
         )
         if request.audio is None and not request.text:
             session.emit(EventType.ERROR, {"message": "frame carries neither text nor audio"})
@@ -700,6 +739,38 @@ async def _handle_client_message(
         return
 
     session.emit(EventType.ERROR, {"message": f"unsupported client message: {kind}"})
+
+
+def _build_turn_request(
+    app: FastAPI,
+    session: Session,
+    message: dict[str, Any],
+    *,
+    text: str = "",
+    audio: AudioChunk | None = None,
+    frames: Any = None,
+) -> TurnRequest:
+    """Build a `TurnRequest` from a client frame, applying the session's bot.
+
+    Shared by every input shape (text, one-shot audio, live frames) so that bot
+    persona, voice and decoding limits cannot drift apart between paths -- the
+    classic symptom being "streaming turns ignore the bot's voice".
+    """
+
+    bot = app.state.bots.get(session.bot_id) if session.bot_id else None
+    return TurnRequest(
+        text=text,
+        audio=audio,
+        frames=frames,
+        speak=bool(message.get("speak", True)),
+        language=str(message.get("language") or session.language),
+        system_prompt=bot.persona.system_prompt if bot else "",
+        voice=bot.tts.voice if bot else None,
+        max_tokens=bot.conversation.max_tokens if bot else app.state.config.pipeline.max_tokens,
+        temperature=bot.conversation.temperature if bot else app.state.config.pipeline.temperature,
+        chunk_min_chars=app.state.config.pipeline.chunk_min_chars,
+        chunk_max_chars=app.state.config.pipeline.chunk_max_chars,
+    )
 
 
 def _decode_audio(message: dict[str, Any]) -> AudioChunk:

@@ -153,6 +153,10 @@ TIMELINE_STAGES: tuple[str, ...] = (
     "turn_started",
     "vad_end",
     "asr_start",
+    # Present only when the recogniser produced a hypothesis before the
+    # utterance ended. Its absence is meaningful: it means this turn waited for
+    # the whole utterance, which is exactly the latency this phase measures.
+    "asr_first_partial",
     "asr_end",
     "llm_start",
     "llm_first_token",
@@ -219,6 +223,18 @@ class TurnTimeline:
         return None if start is None or end is None else int(round((end - start) * 1000))
 
     @property
+    def asr_ttfp_ms(self) -> int | None:
+        """Speech start -> first partial hypothesis.
+
+        On the replay path (`iter_frames` over a finished buffer) this measures
+        the recogniser alone, because `asr_start` is stamped when the replay
+        begins rather than when the sound was captured. On the live path it is
+        the number a user feels.
+        """
+
+        return self._delta_ms("asr_start", "asr_first_partial")
+
+    @property
     def llm_ttft_ms(self) -> int | None:
         return self._delta_ms("llm_start", "llm_first_token")
 
@@ -256,6 +272,7 @@ class TurnTimeline:
             "session_id": self.session_id,
             "stages": dict(self.marks),
             "asr_latency_ms": self.asr_latency_ms,
+            "asr_ttfp_ms": self.asr_ttfp_ms,
             "llm_ttft_ms": self.llm_ttft_ms,
             "tts_ttfa_ms": self.tts_ttfa_ms,
             "time_to_first_audio_ms": self.time_to_first_audio_ms,
@@ -266,6 +283,7 @@ class TurnTimeline:
     def metrics(self) -> dict[str, int]:
         derived = {
             "asr_latency": self.asr_latency_ms,
+            "asr_ttfp": self.asr_ttfp_ms,
             "llm_ttft": self.llm_ttft_ms,
             "tts_ttfa": self.tts_ttfa_ms,
             "time_to_first_audio": self.time_to_first_audio_ms,

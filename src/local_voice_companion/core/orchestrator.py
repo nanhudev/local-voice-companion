@@ -17,8 +17,12 @@ import asyncio
 import base64
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterable, Sequence
 
+if TYPE_CHECKING:  # pragma: no cover - typing-only imports
+    from ..core.audio import AudioFrame
+
+from ..core.audio import iter_frames
 from ..core.cancellation import CancellationToken
 from ..core.errors import CancelledTurn, ProviderUnavailable
 from ..core.events import EventType, TurnTimeline
@@ -69,9 +73,17 @@ class Pipeline:
 
 @dataclass
 class TurnRequest:
-    """Either `audio` or `text` must be supplied."""
+    """Either `audio`, `frames` or `text` must be supplied.
+
+    `frames` is the live-microphone shape: audio that is still arriving, owned by
+    the caller (usually a :class:`~local_voice_companion.core.audio.InputAudioStream`).
+    When it is set, transcription runs as the frames arrive instead of after the
+    fact, which is the only way a partial hypothesis can reach the client before
+    the user finishes speaking.
+    """
 
     audio: AudioChunk | None = None
+    frames: AsyncIterator["AudioFrame"] | None = field(default=None, repr=False, compare=False)
     text: str = ""
     system_prompt: str = "You are a concise and friendly voice assistant."
     voice: str | None = None
@@ -83,8 +95,8 @@ class TurnRequest:
     chunk_max_chars: int = 120
 
     def __post_init__(self) -> None:
-        if not self.text and self.audio is None:
-            raise ValueError("TurnRequest needs either text or audio")
+        if not self.text and self.audio is None and self.frames is None:
+            raise ValueError("TurnRequest needs text, audio or frames")
 
 
 @dataclass
@@ -150,6 +162,90 @@ async def transcribe_turn(
     return transcript.strip()
 
 
+def _supports_partials(asr: ASRProvider | None) -> bool:
+    """Whether the loaded recogniser can produce hypotheses before audio ends.
+
+    Read from the descriptor rather than from the provider's class, so a
+    provider that gains the capability (or loses it after a failed load) is
+    judged by what it actually advertises right now.
+    """
+
+    return asr is not None and asr.descriptor().supports_partial_results
+
+
+async def _aiter_frames(frames: Iterable["AudioFrame"]) -> AsyncIterator["AudioFrame"]:
+    """Lift a synchronous frame iterator into the async shape the contract wants.
+
+    Replaying a finished buffer is synchronous by nature; the streaming contract
+    is async. Bridging here keeps a single consumption path instead of a second
+    synchronous one that would drift.
+    """
+
+    for frame in frames:
+        yield frame
+
+
+async def transcribe_stream(
+    pipeline: Pipeline,
+    frames: AsyncIterator["AudioFrame"],
+    language: str,
+    *,
+    timeline: TurnTimeline,
+    token: CancellationToken,
+    session: Session,
+) -> str:
+    """Transcribe audio that is still arriving, publishing every hypothesis.
+
+    `asr.partial` is emitted for each non-final update and `asr.final` exactly
+    once, always -- including when the stream is cancelled and produced nothing.
+    A client tracking a transcript needs a terminator; a stream that merely
+    stops is indistinguishable from a stalled socket.
+
+    `vad_end` is deliberately *not* marked here. Whoever closes the audio stream
+    knows when the speaker stopped; the recogniser only knows when the frames
+    ran out, and marking it here would report every final-decode latency as
+    "speech end -> result" while actually measuring "last frame dequeued ->
+    result".
+    """
+
+    pipeline.require("asr")
+    assert pipeline.asr is not None
+    ensure_ready(pipeline.asr)
+
+    timeline.mark("asr_start")
+    started = _perf_counter()
+    transcript = ""
+    degraded = False
+    try:
+        async for update in pipeline.asr.stream_transcribe(
+            frames, language=language, token=token
+        ):
+            if update.is_final:
+                transcript = update.text
+                degraded = update.degraded
+                continue
+            if not update.text:
+                continue
+            if "asr_first_partial" not in timeline.marks:
+                timeline.mark("asr_first_partial")
+            session.emit(
+                EventType.ASR_PARTIAL, update.to_dict(), turn_id=timeline.turn_id
+            )
+    finally:
+        timeline.mark("asr_end")
+        session.emit(
+            EventType.ASR_FINAL,
+            {
+                "text": transcript,
+                "elapsed_ms": int((_perf_counter() - started) * 1000),
+                "degraded": degraded,
+            },
+            turn_id=timeline.turn_id,
+        )
+    token.raise_if_cancelled()
+    return transcript.strip()
+
+
 async def run_turn(session: Session, pipeline: Pipeline, request: TurnRequest) -> TurnResult:
     """Execute a complete conversational turn."""
 
@@ -158,11 +254,45 @@ async def run_turn(session: Session, pipeline: Pipeline, request: TurnRequest) -
     language = request.language or session.language
 
     try:
-        if request.audio is not None:
+        if request.frames is not None:
+            # Live microphone path: frames are still arriving, so partials can
+            # reach the client before the speaker stops.
             session.set_state(TurnState.TRANSCRIBING)
-            transcript = await transcribe_turn(
-                pipeline, request.audio, language, timeline=timeline, token=token, session=session
+            transcript = await transcribe_stream(
+                pipeline, request.frames, language, timeline=timeline, token=token, session=session
             )
+        elif request.audio is not None:
+            session.set_state(TurnState.TRANSCRIBING)
+            if _supports_partials(pipeline.asr):
+                # A finished buffer walked through the same streaming path, so
+                # the one-shot API cannot silently skip partials. `vad_end` is
+                # marked here because for a finished utterance the speaker has
+                # already stopped -- there is no stream close to wait for.
+                timeline.mark("vad_end")
+                transcript = await transcribe_stream(
+                    pipeline,
+                    _aiter_frames(iter_frames(request.audio)),
+                    language,
+                    timeline=timeline,
+                    token=token,
+                    session=session,
+                )
+            else:
+                transcript = await transcribe_turn(
+                    pipeline, request.audio, language, timeline=timeline, token=token, session=session
+                )
+        else:
+            timeline.mark("vad_end")
+            timeline.mark("asr_start")
+            timeline.mark("asr_end")
+            transcript = request.text.strip()
+            result.transcript = transcript
+            session.emit(EventType.ASR_FINAL, {"text": transcript, "source": "text"}, turn_id=timeline.turn_id)
+
+        # Shared tail for both audio shapes: a near-empty transcript is noise,
+        # not a turn, and dropping it here keeps the guard in one place instead
+        # of one per path.
+        if request.audio is not None or request.frames is not None:
             if len(transcript) < MAX_TRANSCRIPT_RETRY_CHARS:
                 session.emit(
                     EventType.ASR_FINAL,
@@ -175,13 +305,6 @@ async def run_turn(session: Session, pipeline: Pipeline, request: TurnRequest) -
             result.transcript = transcript
             session.last_transcript = transcript
             session.emit(EventType.ASR_FINAL, {"text": transcript}, turn_id=timeline.turn_id)
-        else:
-            timeline.mark("vad_end")
-            timeline.mark("asr_start")
-            timeline.mark("asr_end")
-            transcript = request.text.strip()
-            result.transcript = transcript
-            session.emit(EventType.ASR_FINAL, {"text": transcript, "source": "text"}, turn_id=timeline.turn_id)
 
         session.append("user", transcript)
 
