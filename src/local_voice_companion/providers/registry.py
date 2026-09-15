@@ -64,7 +64,7 @@ class ProviderRegistry:
         return sorted(
             key
             for key, registration in self._classes.items()
-            if kind is None or registration.descriptor.kind is kind
+            if kind is None or registration.descriptor.kind == kind
         )
 
     def get_class(self, provider_id: str) -> type[BaseProvider]:
@@ -83,7 +83,7 @@ class ProviderRegistry:
         return [
             registration.descriptor
             for key, registration in sorted(self._classes.items())
-            if kind is None or registration.descriptor.kind is kind
+            if kind is None or registration.descriptor.kind == kind
         ]
 
     def __contains__(self, provider_id: object) -> bool:
@@ -95,6 +95,12 @@ class ProviderRegistry:
 
     def __len__(self) -> int:
         return len(self._classes)
+
+    #: An empty registry is a *valid* registry. Without this, `__len__` makes
+    #: the object falsy and any `target or registry` fallback silently discards
+    #: a caller's isolated registry in favour of the module singleton -- which
+    #: is exactly the bug that made `ids(kind)` appear to return nothing.
+    __bool__ = lambda self: True  # noqa: E731
 
     # -- instance pool ------------------------------------------------------
 

@@ -54,27 +54,58 @@ _builtins_registered = False
 
 
 def register_builtin_providers(target: ProviderRegistry | None = None) -> list[str]:
-    """Register the built-in provider set (fake + legacy adapters).
+    """Register the built-in provider set.
 
-    Idempotent: a provider id that is already registered with the same class is
-    skipped silently. Returns the ids now present for the requested kinds.
+    Three tiers, in increasing order of what they need from the machine:
+
+    * ``fake``   -- deterministic doubles used by CI. No dependencies at all.
+    * ``local``  -- native inference on this machine (faster-whisper, Kokoro).
+    * ``legacy`` -- HTTP adapters for an existing Voicebox / Ollama install.
+
+    The local tier is imported lazily and its import failure is swallowed on
+    purpose: a user with neither onnxruntime nor CTranslate2 still gets a
+    working runtime, just one that reports those providers as unavailable. An
+    ImportError escaping here would take down the whole application because two
+    optional extras are missing.
     """
 
     from .fake import FAKE_PROVIDERS
     from .legacy import LEGACY_PROVIDERS
 
-    reg = target or registry
-    for cls in (*FAKE_PROVIDERS, *LEGACY_PROVIDERS):
+    # Explicit None check, never `target or registry`: an empty registry is
+    # falsy under __len__, so the `or` form would quietly redirect every
+    # registration into the module singleton -- including the isolated
+    # registries the tests build on purpose.
+    reg = registry if target is None else target
+
+    classes: list[type[BaseProvider]] = [*FAKE_PROVIDERS]
+    try:
+        from .local import NATIVE_PROVIDERS
+
+        classes.extend(NATIVE_PROVIDERS)
+    except Exception:  # noqa: BLE001 - optional tier, see docstring
+        pass
+    classes.extend(LEGACY_PROVIDERS)
+
+    for cls in classes:
         reg.register(cls)
     return reg.ids()
 
 
 def ensure_builtin_providers(target: ProviderRegistry | None = None) -> ProviderRegistry:
-    """Register builtins once, then return the registry to use."""
+    """Register builtins once, then return the registry to use.
+
+    With an explicit ``target`` the builtins are always (re-)registered there,
+    so each caller's isolated registry gets a full set. With no argument the
+    module singleton is populated at most once.
+    """
 
     global _builtins_registered
-    reg = target or registry
-    if not _builtins_registered or target is not None:
+    reg = registry if target is None else target
+    if target is not None:
+        register_builtin_providers(reg)
+        return reg
+    if not _builtins_registered:
         register_builtin_providers(reg)
         _builtins_registered = True
     return reg
