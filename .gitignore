@@ -23,6 +23,21 @@ build/
 # Local model and data directories. These are large, machine-specific, and
 # deliberately kept off the repository (see docs/ARCHITECTURE.md on data roots).
 .models/
+models/
 data/
 .DS_Store
 Thumbs.db
+
+# Model weights must never be committed. They live under the data root, but a
+# stray copy placed beside the source (or a partially fetched one) would add
+# hundreds of megabytes to the history -- and Git history is forever.
+*.bin
+*.onnx
+*.pt
+*.pth
+*.gguf
+*.tar
+*.tar.gz
+
+# A truncated download left by an interrupted `lvc models fetch`.
+*.part

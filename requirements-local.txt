@@ -1,0 +1,16 @@
+# Everything needed for a fully offline, CPU-only voice runtime.
+#
+# This is the combination that satisfies the Phase 2 acceptance criterion:
+# with the GPU disabled and the network switched off, the selector picks
+# faster_whisper_cpu + kokoro_tts_cpu and completes a real turn.
+#
+# Install:
+#     pip install -r requirements-local-asr.txt -r requirements-local-tts.txt
+#     lvc models fetch            # explicit, resumable, never automatic
+#
+# It deliberately does NOT include PyTorch or any CUDA runtime. If you want a
+# GPU path later, that is a separate decision with a separate download -- and
+# on a machine with limited free space on C: it needs planning first.
+
+-r requirements-local-asr.txt
+-r requirements-local-tts.txt

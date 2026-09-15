@@ -1,0 +1,16 @@
+# Native local ASR (faster-whisper, CPU INT8).
+#
+# MIT licensed. This pulls CTranslate2 but *not* PyTorch and *not* the CUDA
+# runtime, which is the whole point: it is a CPU-first engine that an ordinary
+# Windows machine can install without a several-gigabyte torch download.
+#
+# Install:
+#     pip install -r requirements-local-asr.txt
+# Then fetch the weights explicitly (nothing is downloaded on import):
+#     lvc models fetch faster-whisper-base
+#
+# Pinned to the versions this project was verified against. See
+# docs/PROVIDER_LICENSES.md for the licence boundary that matters here.
+
+faster-whisper==1.2.1
+ctranslate2==4.8.2

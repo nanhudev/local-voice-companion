@@ -1,0 +1,21 @@
+# Native local TTS (Kokoro-82M v1.1 zh, CPU via ONNX Runtime).
+#
+# Kokoro is Apache-2.0; misaki is Apache-2.0. No PyTorch is required -- the
+# engine runs through onnxruntime on the CPU execution provider.
+#
+# Install:
+#     pip install -r requirements-local-tts.txt
+# Then fetch the weights explicitly:
+#     lvc models fetch kokoro-v1.1-zh
+#
+# `misaki[zh]` brings the Chinese grapheme-to-phoneme stack (jieba, pypinyin,
+# cn2an). `espeakng-loader` and `phonemizer` are listed because Kokoro's
+# upstream expects an espeak fallback, but on Windows that fallback is NOT
+# usable -- see docs/PROVIDER_LICENSES.md and the note in
+# providers/local/runtime_probe.py. misaki is the only working G2P here.
+
+kokoro-onnx==0.6.1
+onnxruntime==1.30.0
+misaki[zh]==0.9.4
+espeakng-loader==0.2.4
+phonemizer==3.4.0
