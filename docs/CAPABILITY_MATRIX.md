@@ -104,7 +104,7 @@ engine change, which is the point of keeping them as providers.
 | Config migration | ✅ | v1 → v2, one-way, idempotent |
 | Hardware probing | ✅ | CPU, RAM, GPU, VRAM, accelerators, services |
 | Benchmark cache | ✅ | Keyed on hardware fingerprint **and provider version**; sim vs measured is explicit |
-| Model fetch + doctor | ✅ | `lvc models {list,status,fetch}` and `lvc doctor`; nothing downloads implicitly |
+| Model fetch + doctor | ✅ | `python lvc.py models {list,status,fetch}` and `python lvc.py doctor`; nothing downloads implicitly |
 | Real local ASR | ✅ | faster-whisper INT8 on CPU |
 | Real local TTS | ✅ | Kokoro-82M zh on CPU, 103 voices |
 | Local LLM | ❌ | The remaining hole — see gaps above |

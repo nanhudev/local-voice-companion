@@ -28,7 +28,7 @@ What landed:
 - `kokoro_tts_cpu` — Kokoro-82M v1.1 zh on onnxruntime, 103 voices, Apache-2.0.
 - A `ModelStore` that enforces *no implicit downloads*: missing weights raise
   with the exact command that fixes it, and fetches are atomic with size floors.
-- `lvc models {list,status,fetch}` and `lvc doctor`, including native runtime
+- `python lvc.py models {list,status,fetch}` and `python lvc.py doctor`, including native runtime
   and Chinese-G2P checks.
 - Real measured benchmarks replacing simulated ones (`all_measured: true`).
 - Optional requirement files so the base install stays light:

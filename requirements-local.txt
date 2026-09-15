@@ -6,7 +6,7 @@
 #
 # Install:
 #     pip install -r requirements-local-asr.txt -r requirements-local-tts.txt
-#     lvc models fetch            # explicit, resumable, never automatic
+#     python lvc.py models fetch  # explicit, resumable, never automatic
 #
 # It deliberately does NOT include PyTorch or any CUDA runtime. If you want a
 # GPU path later, that is a separate decision with a separate download -- and

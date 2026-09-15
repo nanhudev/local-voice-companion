@@ -25,7 +25,7 @@ G2P is probed, reported and benchmarked as its own concern:
   check and the runtime check. A provider can therefore be reported as
   unreachable specifically because of its G2P backend, with an actionable
   message, rather than generically unavailable.
-* `lvc doctor` reports **Native Chinese G2P (misaki)** as its own line.
+* `python lvc.py doctor` reports **Native Chinese G2P (misaki)** as its own line.
 * Every TTS benchmark records `g2p_backend` and includes G2P time in the
   measured synthesis duration — not because that inflates the number, but
   because leaving it out would understate what the user actually waits for.

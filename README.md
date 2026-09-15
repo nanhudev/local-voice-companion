@@ -1,246 +1,341 @@
 # Local Voice Companion
 
+![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![Runs offline](https://img.shields.io/badge/offline-capable-brightgreen.svg)
+
 English | [简体中文](#简体中文)
 
-An **adaptive local voice runtime**. It probes the machine it is running on,
-decides which speech recognition, language model, and speech synthesis to use,
-and then serves conversations over that plan to any client — browser, game
-engine, or another agent.
+**A voice assistant that runs on your own computer.**
 
-It is not a wrapper around one engine. Voicebox and Ollama are providers here,
-exactly like the fake providers used in tests are providers — and so are the two
-native engines that actually run inference in-process.
+You talk. It writes down what you said, asks a language model for an answer,
+and speaks the answer back — all three steps on your machine, with nothing
+uploaded and no account to sign up for.
 
-## Highlights
+```
+   🎙 you speak
+        ↓   speech → text        your machine
+        ↓   think                a model you choose
+        ↓   text → speech        your machine
+   🔊 it answers
+```
 
-- **Real local ASR and TTS** — `faster_whisper_cpu` and `kokoro_tts_cpu` run
-  inference on the CPU with no network and no GPU [1]
-- **Hardware probing** — CPU, RAM, GPU, VRAM, accelerators, and installed
-  services, reported rather than assumed
-- **Adaptive selection** — candidates are filtered, scored, and planned into one
-  ASR + LLM + TTS combination that fits the machine
-- **Time To First Audio** as the headline metric, with a full per-stage timeline
-- **Turn state machine** with proper barge-in via cancellation tokens
-- **Bounded queues** with counted overflow, so a slow consumer cannot become an
-  out-of-memory crash
-- **Streaming** generation and synthesis, running concurrently
-- **Portable bot manifests** — export from one machine, import on another
-- **Structured event stream** over HTTP and WebSocket
-- Microphone voice activity detection and streaming turn handling
-- Ollama-compatible and Voicebox-compatible providers (optional)
-- Optional Windows GPU worker for split-machine setups
-- Minimal Godot integration example
+It runs as a small local server with a page you open in your browser. The same
+server speaks plain HTTP and WebSocket, so a game, a script, a shortcut key, or
+another agent can use the assistant too.
 
-[1] Both are optional extras so the base install stays light. Neither is the default
-LLM — see the status section.
+## Why you might want it
 
-## Documentation
+- **Yours.** Audio and transcripts never leave the machine. No cloud account, no
+  usage billing, no telemetry.
+- **No graphics card required.** Everything runs on the CPU, and it picks a
+  combination that actually fits your machine when it starts.
+- **Keep talking with the network off.** Once the models are downloaded, it
+  works offline.
+- **Bring your own brain.** Point it at Ollama, or at any compatible service. You
+  choose who does the thinking.
+- **Characters you can carry around.** Personality, voice and settings save to a
+  single file you can move to another machine.
+- **Open source, MIT licensed.** Read it, change it, ship it.
 
-| Document | Contents |
-| --- | --- |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the runtime works and why |
-| [API.md](docs/API.md) | Every endpoint, with the real response shapes |
-| [DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) | What works, what does not, current test results |
-| [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) | Which providers actually run today |
-| [BENCHMARKING.md](docs/BENCHMARKING.md) | How latency is measured, and how it avoids inventing numbers |
-| [ROADMAP.md](docs/ROADMAP.md) | Phases, including realtime duplex voice |
-| [DUPLEX_FEASIBILITY.md](docs/DUPLEX_FEASIBILITY.md) | Whether GPT-style listen-while-speaking can run locally, and what it costs |
-| [SECURITY.md](docs/SECURITY.md) | Threat model and secret handling |
-| [CURRENT_ARCHITECTURE.md](docs/CURRENT_ARCHITECTURE.md) | PHASE 0 audit of the original codebase |
-| [docs/adr/](docs/adr/) | Architecture decision records |
-| [docs/PROVIDER_LICENSES.md](docs/PROVIDER_LICENSES.md) | Licence of every model and runtime, and why Piper is excluded |
+## Requirements
 
-## Status, stated plainly
+- Windows 10/11 with Python 3.11 or newer
+- A microphone — optional, you can type instead
+- Roughly 1 GB of free disk if you want speech to run locally (models plus their
+  runtime, downloaded once)
 
-**238 tests pass, none skipped or fabricated**, across unit, integration,
-contract, and smoke tiers. Verified stable across consecutive runs.
+## Install
 
-Local voice now works offline. On a machine with the GPU disabled, the network
-off and no Voicebox, `policy=cpu_only` selects `faster_whisper_cpu` +
-`kokoro_tts_cpu` and completes `real WAV → ASR → transcript → LLM → text → TTS →
-valid WAV`, with every stage genuinely measured:
-
-| Stage | Provider | Median | RTF | Source |
-| --- | --- | --- | --- | --- |
-| ASR | `faster_whisper_cpu` (`base`, INT8) | 573.6 ms | 0.287 | measured |
-| TTS | `kokoro_tts_cpu` (`kokoro-v1.1-zh`) | 1101.5 ms | 0.337 | measured |
-| TTFA | end to end | 2077.8 ms | — | measured |
-
-Measured on the reference machine with `--policy cpu_only`. RTF below 1.0 means
-faster than real time; both stages clear it comfortably, which is what makes a
-CPU-only conversation practical rather than merely possible.
-
-**What is still missing, stated as plainly:** there is **no local LLM**, so an
-offline reply is deterministic stub text. The runtime hears and speaks through
-real local models and reasons from a template. There is deliberately no measured
-LLM latency above, because inventing one from a stub is exactly the dishonesty
-this project avoids. Both engines are also **single-pass** — no partial
-transcripts, no progressive audio — which sets the latency floor PHASE 3 has to
-attack. Cold start adds several seconds to load Kokoro's 325 MB graph and is not
-in the warm numbers above.
-
-Full detail, including what these numbers do *not* cover, in
-[BENCHMARKING.md](docs/BENCHMARKING.md) and
-[CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md).
-
-## Quick start on Windows
+Open PowerShell in the folder where you want it:
 
 ```powershell
+git clone https://github.com/nanhudev/local-voice-companion.git
+cd local-voice-companion
 py -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 Copy-Item config.example.json config.json
-.\.venv\Scripts\python app.py
 ```
 
-Open `http://127.0.0.1:17831`. For the guided setup, run `setup.ps1` once and use `start.ps1` afterward. Run `doctor.ps1` when a model endpoint, speech service, or microphone is not detected.
+Prefer a guided install? Run `setup.ps1` once instead — it does exactly these
+steps and creates `config.json` for you.
 
-### Running the new runtime
+### Turn on speech that stays local
 
-The adaptive runtime is available now, alongside the original gateway. It will
-become the default in a later phase; today it is opt-in:
+This extra step puts the listening and speaking on your machine, so nothing has
+to go outside for either. It is downloaded once, and only when you ask:
 
 ```powershell
-.\.venv\Scripts\python app.py --runtime
+.\.venv\Scripts\pip install -r requirements-local.txt
+.\.venv\Scripts\python lvc.py models fetch
+.\.venv\Scripts\python lvc.py doctor          # checks everything is in place
 ```
 
-Then:
-
-```
-GET  /healthz                     liveness
-GET  /readyz                      readiness — 503 until a pipeline is prepared
-GET  /api/v1/system/profile       what this machine actually has
-GET  /api/v1/providers            what is registered and in what state
-POST /api/v1/selection/recommend  the plan, with scores and reasons
-```
-
-Interact with it:
+## Run it
 
 ```powershell
-# What does this machine look like?
-curl http://127.0.0.1:17831/api/v1/system/profile
+.\start.ps1
+```
 
-# What would it choose?
-curl -X POST http://127.0.0.1:17831/api/v1/selection/recommend `
-     -H "Content-Type: application/json" -d '{}'
+Then open **<http://127.0.0.1:17831>**.
 
-# Create a bot, open a session, run a turn
-curl -X POST http://127.0.0.1:17831/api/v1/bots `
+> `.\.venv\Scripts\python app.py` does the same thing without the wrapper script.
+
+## Use it
+
+1. Open the page above and allow microphone access.
+2. **Talk.** It notices when you stop speaking and answers out loud.
+3. **Or type** in the box at the bottom — useful for checking the whole chain
+   without saying a word.
+4. On the right-hand panel, pick a different voice, model or personality. Save
+   and warm up when you change something.
+
+### From the command line
+
+| Command | What it tells you |
+| --- | --- |
+| `python lvc.py doctor` | What is missing, and how to fix it |
+| `python lvc.py models list` | Every model it knows about |
+| `python lvc.py models status` | What is already downloaded |
+| `python lvc.py probe` | What your machine has |
+| `python lvc.py plan` | Which combination it picked, and why |
+| `python lvc.py where` | Where files are stored |
+
+Replace `python` with `.\.venv\Scripts\python` if the virtual environment is not
+active.
+
+### From your own program
+
+Create a session, then send a message. Everything answers over the same server:
+
+```bash
+# 1. a character (optional — there is a usable default)
+curl -X POST http://127.0.0.1:17831/api/v1/bots \
      -H "Content-Type: application/json" -d '{"id":"demo","name":"Demo"}'
+
+# 2. a conversation
+curl -X POST http://127.0.0.1:17831/api/v1/sessions \
+     -H "Content-Type: application/json" -d '{"bot_id":"demo"}'
+
+# 3. one line of dialogue, spoken audio returned with the reply
+curl -X POST http://127.0.0.1:17831/api/v1/sessions/<session-id>/turns \
+     -H "Content-Type: application/json" -d '{"text":"你好","speak":true}'
 ```
 
-See [API.md](docs/API.md) for the full surface and [DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md)
-for what currently works end to end.
+For live conversation — microphone frames going in, partial transcripts and audio
+coming back — connect to `ws://127.0.0.1:17831/api/v1/sessions/<session-id>/stream`
+and send `{"type":"audio.start"}`, `{"type":"audio.frame","audio_base64":"…"}`,
+`{"type":"audio.end"}`.
 
-### Tests
+There is a ready-made Godot example in `godot/`, and the complete endpoint
+reference in [docs/API.md](docs/API.md).
+
+## Common questions
+
+**Does it need the internet?** After the models are fetched, no. Until then, only
+to download.
+
+**Where did it put those big model files?** `python lvc.py where` prints every
+path. It avoids the system drive when it can; set `LVC_DATA_ROOT` to put them
+somewhere specific.
+
+**Microphone or voices not detected?** Run `python lvc.py doctor`.
+
+**It answers weirdly.** The reply comes from whatever language model you pointed
+it at. Change it in the panel or in `config.json`.
+
+## Where the project is heading
+
+- **A brain that needs no external service** — so a fully offline install really
+  is fully offline. Today the reply comes from a model you supply, usually
+  Ollama.
+- **Seeing your words appear while you speak**, instead of waiting for you to
+  finish.
+- **Talking over it.** Interrupting mid-sentence already works; making that feel
+  natural in every setup is the current work.
+- **Correct speaker support** — right now headphones give the best result.
+
+Details are tracked in [docs/ROADMAP.md](docs/ROADMAP.md) and
+[docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md).
+
+## Contributing
+
+This is an open source project and issues and pull requests are welcome. If you
+change behaviour, please run the suite first — it is honest, and skipped tests
+mean something is genuinely missing:
 
 ```powershell
 .\.venv\Scripts\python -m pytest
 ```
 
-Tiers: `tests/unit`, `tests/integration`, `tests/contract`, `tests/smoke`,
-`tests/legacy`. Hardware-dependent tests are marked and skipped by default.
-
-### Data location
-
-Models are tens of gigabytes, so the runtime defaults its data root to
-`D:\AI_Workspace\local-voice-companion` rather than the system drive, and picks
-the candidate with the most free space. Override with `LVC_DATA_ROOT`.
-
-## Backends
-
-Providers are registered, discovered, and selected — not configured by name in
-the code.
-
-- **LLM:** `ollama_llm` (Ollama or a compatible endpoint), `fake_llm`
-- **ASR:** `faster_whisper_cpu` (**local**, CPU INT8), `voicebox_asr`
-  (Voicebox-compatible `/health`, `/profiles`, `/transcribe`), `fake_asr`
-- **TTS:** `kokoro_tts_cpu` (**local**, 103 zh voices), `voicebox_tts`
-  (Voicebox-compatible `/generate/stream`), `fake_tts`
-- **VAD:** `fake_vad`
-- **Relay worker:** configured with `AI_RELAY_WS_URL` and `AI_RELAY_TOKEN`
-
-Copy `config.example.json` to `config.json` and adjust endpoints for your machine. Secrets are read from environment variables; do not commit tokens or machine-specific configuration.
-
-The local providers need one extra step, and only one. They are **optional
-extras** — nothing is installed into the base environment, and nothing is
-downloaded on import:
-
-```powershell
-# CPU-only local speech (~530 MB of packages, no PyTorch, no CUDA runtime)
-pip install -r requirements-local.txt
-
-# Then fetch weights explicitly. Nothing downloads silently, ever.
-lvc models fetch
-lvc models list          # what is present, what is missing
-lvc doctor               # runtime, weights and Chinese G2P checks
-```
-
-Or take them one at a time with `requirements-local-asr.txt` and
-`requirements-local-tts.txt`. From here, `policy=cpu_only` works with the
-network switched off.
-
-The compatibility providers are optional too. Disable them and the runtime still
-starts, still plans, and still completes a turn with the fake providers — which
-is what makes the whole pipeline testable.
-
-## Requirements
-
-Windows 10/11, Python 3.11+, and a supported local model or speech backend. A
-microphone is required only for hands-free voice input; the text interface can be
-tested without one.
-
-## Project status
-
-The adaptive runtime, gateway, browser UI, backend discovery, diagnostics, smoke
-test, and Godot sample are included. Actual speech quality and latency depend on
-the ASR/TTS models installed on the host machine.
-
-Local hearing and speaking now work without network or GPU — see the status
-section above for the measured numbers, and
-[CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) for what is still missing.
+Design decisions are archived in [docs/adr/](docs/adr/), which is the fastest way
+to understand why something is built the way it is.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+Third-party model and runtime licences are listed in
+[docs/PROVIDER_LICENSES.md](docs/PROVIDER_LICENSES.md). Everything bundled is
+permissively licensed; Piper was evaluated and left out on licensing grounds.
+
+---
 
 ## 简体中文
 
-这是一个**自适应本地语音运行时**。它会先探测所在机器的硬件，决定使用哪套语音识别、
-语言模型与语音合成，然后基于这份方案对外提供对话能力，供浏览器、游戏引擎或其它智能体调用。
+![许可证：MIT](https://img.shields.io/badge/license-MIT-green.svg)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![可离线运行](https://img.shields.io/badge/offline-capable-brightgreen.svg)
 
-它不是一个特定引擎的外壳。Voicebox 和 Ollama 在这里只是 provider，与测试用的 fake
-provider 地位相同。
+**一个跑在你自己电脑上的语音助手。**
 
-项目包含：硬件探测、自适应选择（候选 → 约束 → 评分 → 决策）、完整回合状态机与打断
-（barge-in）、有界队列、流式生成与合成、可移植的 bot 清单、结构化事件流，以及四层测试
-（unit / integration / contract / smoke）。
+你说话，它把你说的转成文字，交给语言模型思考，再把回答合成成语音播放出来。
+三步都在本机完成，音频不上传，也不需要注册任何账号。
 
-文档入口：[架构](docs/ARCHITECTURE.md)、[API](docs/API.md)、
-[开发状态](docs/DEVELOPMENT_STATUS.md)、[能力矩阵](docs/CAPABILITY_MATRIX.md)、
-[路线图](docs/ROADMAP.md)、[安全](docs/SECURITY.md)、[ADR](docs/adr/)。
-
-**当前状态（如实说明）**：测试 `238 passed`，无跳过、无伪造通过，连续运行结果稳定。
-
-**本地语音已真正可用（离线、纯 CPU）**：在没有 GPU、没有网络、没有 Voicebox 的机器上，
-`policy=cpu_only` 会选中 `faster_whisper_cpu` 与 `kokoro_tts_cpu`，完成
-`真实 WAV → ASR → 文本 → LLM → 文本 → TTS → 合法 WAV` 全链路，且每个阶段都是**实测**
-而非估算：ASR 中位 573.6 ms（RTF 0.287）、TTS 中位 1101.5 ms（RTF 0.337）、TTFA
-2077.8 ms。
-
-需要额外安装一次（不会影响基础安装体积，也不会在导入时偷偷下载模型）：
-
-```powershell
-pip install -r requirements-local.txt
-lvc models fetch
+```
+   🎙 你说话
+        ↓   语音 → 文字        在你电脑上完成
+        ↓   思考               由你指定的模型完成
+        ↓   文字 → 语音        在你电脑上完成
+   🔊 它回答
 ```
 
-**仍需如实说明的缺口**：没有本地 LLM，离线回合的回复仍是确定性占位文本——它真的在听、
-真的在说，但还不能真的思考；两个引擎都是单趟推理，没有流式部分结果，因此延迟存在下限；
-冷启动加载 Kokoro 的 325 MB 图需要数秒，未计入上文的 warm 数字。
+它以一个本地小服务的形式运行，附带一个浏览器页面可以直接用；同一个服务同时提供
+标准 HTTP 与 WebSocket 接口，所以游戏、脚本、快捷键或者别的智能体也能接进来。
 
-Windows 首次使用可运行 `setup.ps1`，之后使用 `start.ps1`；后端或麦克风未识别时运行
-`doctor.ps1`。打开 `http://127.0.0.1:17831` 即可使用。新的自适应运行时可加 `--runtime`
-参数启用。请从 `config.example.json` 创建本机配置，令牌通过环境变量提供，不要提交私密凭据。
+## 为什么值得一试
 
-模型体积很大，默认数据目录放在 `D:\AI_Workspace\local-voice-companion`（可自动选择剩余空间
-最大的盘），避免占满系统盘；可用 `LVC_DATA_ROOT` 覆盖。
+- **东西是自己的。** 音频和转写结果不出本机，没有云账号、没有按量计费、没有数据回传。
+- **不需要独立显卡。** 全部跑在 CPU 上，启动时会自动挑一套适合你这台机器的组合。
+- **断网也能继续用。** 模型下载完成后，断网照样对话。
+- **大脑由你指定。** 可以指向 Ollama 或任何兼容服务，由你决定谁来思考。
+- **角色可以带走。** 性格、声音和设置能存成一个文件，换台机器直接导入。
+- **MIT 开源。** 可以读、可以改、可以发布。
+
+## 环境要求
+
+- Windows 10/11，Python 3.11 及以上
+- 麦克风（可选，打字也能用）
+- 想让语音完全跑在本地，留出约 1 GB 磁盘（模型及其运行时，只下载一次）
+
+## 安装
+
+在你准备放项目的目录里打开 PowerShell：
+
+```powershell
+git clone https://github.com/nanhudev/local-voice-companion.git
+cd local-voice-companion
+py -m venv .venv
+.\.venv\Scripts\pip install -r requirements.txt
+Copy-Item config.example.json config.json
+```
+
+想要引导式安装，可以直接运行一次 `setup.ps1`，它做的就是上面这几步，并顺便生成
+`config.json`。
+
+### 开启本地语音（推荐）
+
+这一步把"听"和"说"都放到本机完成，两件事都不再需要外部服务。只下载一次，而且
+只在你明确执行时才下载：
+
+```powershell
+.\.venv\Scripts\pip install -r requirements-local.txt
+.\.venv\Scripts\python lvc.py models fetch
+.\.venv\Scripts\python lvc.py doctor          # 检查是否都已就位
+```
+
+## 启动
+
+```powershell
+.\start.ps1
+```
+
+然后打开 **<http://127.0.0.1:17831>**。
+
+> 不用封装脚本的话，`.\.venv\Scripts\python app.py` 效果完全一样。
+
+## 怎么用
+
+1. 打开上面的网址，允许使用麦克风。
+2. **说话。** 它会自己判断你说完了，然后出声回答。
+3. **也可以打字**——底部的输入框走的是同一条链路，不说话也能验证整体是否正常。
+4. 右侧面板可以换声音、换模型、换性格；改完点保存并暖机。
+
+### 命令行
+
+| 命令 | 告诉你什么 |
+| --- | --- |
+| `python lvc.py doctor` | 缺什么、怎么补 |
+| `python lvc.py models list` | 它认识哪些模型 |
+| `python lvc.py models status` | 哪些已经下载好了 |
+| `python lvc.py probe` | 你这台机器的配置 |
+| `python lvc.py plan` | 它选中了什么组合，原因是什么 |
+| `python lvc.py where` | 各类文件的存放位置 |
+
+如果虚拟环境没激活，把 `python` 换成 `.\.venv\Scripts\python`。
+
+### 在自己的程序里调用
+
+先建会话，再发消息，都对着同一个服务：
+
+```bash
+# 1. 建一个角色（可选，有可用默认值）
+curl -X POST http://127.0.0.1:17831/api/v1/bots \
+     -H "Content-Type: application/json" -d '{"id":"demo","name":"Demo"}'
+
+# 2. 开一个会话
+curl -X POST http://127.0.0.1:17831/api/v1/sessions \
+     -H "Content-Type: application/json" -d '{"bot_id":"demo"}'
+
+# 3. 说一句话，回话里带上合成好的语音
+curl -X POST http://127.0.0.1:17831/api/v1/sessions/<会话id>/turns \
+     -H "Content-Type: application/json" -d '{"text":"你好","speak":true}'
+```
+
+要做实时对话——麦克风持续送帧、边识别边出音频——连接
+`ws://127.0.0.1:17831/api/v1/sessions/<会话id>/stream`，依次发送
+`{"type":"audio.start"}`、`{"type":"audio.frame","audio_base64":"…"}`、
+`{"type":"audio.end"}`。
+
+`godot/` 里有一份可直接用的 Godot 示例，完整接口清单见
+[docs/API.md](docs/API.md)。
+
+## 常见问题
+
+**需要联网吗？** 模型下载完之后不需要；在那之前只在下载时要。
+
+**那些大模型文件放哪了？** `python lvc.py where` 会列出全部路径。默认会避开
+系统盘，也可以用 `LVC_DATA_ROOT` 指定位置。
+
+**找不到麦克风或声音？** 运行 `python lvc.py doctor`。
+
+**回答不太对。** 回答来自你指定的语言模型，可以在面板或 `config.json` 里换一个。
+
+## 接下来的方向
+
+- **不再依赖外部服务的本地大脑** —— 现在思考环节由你提供的模型完成（通常是
+  Ollama），还没做到"装完就真的什么都不用配"。
+- **边说边出字** —— 不用等你说完才显示。
+- **可以随时插话打断** —— 中途打断已经能用，目前在把它打磨到各种环境下都自然。
+- **完善外放支持** —— 现阶段戴耳机的效果最好。
+
+进展记录在 [docs/ROADMAP.md](docs/ROADMAP.md) 与
+[docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md)。
+
+## 参与贡献
+
+这是一个开源项目，欢迎提 issue 和 PR。改动行为前请先跑测试——这里的测试不会放水，
+出现 skip 说明确实缺了东西：
+
+```powershell
+.\.venv\Scripts\python -m pytest
+```
+
+设计决策都归档在 [docs/adr/](docs/adr/) 里，想搞清某处为什么这样写，看它最快。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。
+
+第三方模型与运行时的许可证见 [docs/PROVIDER_LICENSES.md](docs/PROVIDER_LICENSES.md)。
+收录的模型均为宽松许可；Piper 经评估因许可问题没有纳入。

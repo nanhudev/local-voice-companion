@@ -1,3 +1,20 @@
+# Base install: enough to launch the server and drive it from the bundled page
+# or the API. Deliberately small -- no PyTorch, no CUDA runtime, nothing is
+# downloaded automatically.
+#
+# Speech running entirely on this machine (no GPU, no network needed afterwards)
+# is a separate, explicit step:
+#
+#     pip install -r requirements-local.txt
+#     python lvc.py models fetch
+
 requests==2.32.5
 sounddevice==0.5.3
 websockets>=13,<16
+
+# Required by the adaptive runtime (`app.py --runtime`) and by every server
+# command. The pre-2.0 gateway alone does not need them, which is how they came
+# to be missing from this file.
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.6
