@@ -112,6 +112,12 @@ class VoiceboxASR(_HttpBacked, ASRProvider):
             latency_tier=3,
             quality_source=QualitySource.CURATED_METADATA,
             version="1.0.0",
+            # Honest even on loopback: the runtime's view of this provider is an
+            # HTTP request with an HTTP request's failure modes. Leaving this at
+            # the default `False` let it survive `allow_network=False` whenever
+            # `cpu_only` was off, which contradicted ADR-0002 and quietly
+            # weakened the offline guarantee.
+            requires_network=True,
             tags=("http://127.0.0.1:17493", "voicebox", "legacy", "compatibility"),
             models=tuple(
                 ModelRef(id=name, display_name=name, languages=("zh", "en"))
@@ -182,6 +188,7 @@ class VoiceboxTTS(_HttpBacked, TTSProvider):
             latency_tier=3,
             quality_source=QualitySource.CURATED_METADATA,
             version="1.0.0",
+            requires_network=True,
             tags=("http://127.0.0.1:17493", "voicebox", "legacy", "compatibility"),
             models=(
                 ModelRef(id="luxtts", display_name="LuxTTS", languages=("zh", "en")),
@@ -284,6 +291,10 @@ class OllamaLLM(_HttpBacked, LLMProvider):
             latency_tier=3,
             quality_source=QualitySource.CURATED_METADATA,
             version="1.0.0",
+            # Same reasoning as the Voicebox pair: the inference may be local to
+            # the host, but reaching it is still an HTTP call that can fail in
+            # ways a truly in-process provider cannot.
+            requires_network=True,
             tags=("http://127.0.0.1:11434", "ollama", "local"),
             models=(ModelRef(id="auto", display_name="Auto-discovered model"),),
         )

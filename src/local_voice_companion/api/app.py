@@ -122,7 +122,7 @@ def create_app(
     runtime_state = state or build_runtime_state(cfg, reg=registry or get_registry())
     app = FastAPI(
         title="Local Voice Companion",
-        version="2.0.0-phase1",
+        version="2.0.0-phase2",
         description=(
             "Adaptive local voice runtime. Provider-agnostic ASR/LLM/TTS selection "
             "with a stable event protocol for any agent, game or application."
