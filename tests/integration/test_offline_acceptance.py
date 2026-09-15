@@ -139,6 +139,16 @@ class TestLocalProviderDeclarations:
         assert "kokoro-onnx" in kokoro and "misaki" in kokoro, kokoro
 
     def test_descriptor_wire_shape_is_stable(self) -> None:
+        """The descriptor key set is pinned, and grew additively in PHASE 3.
+
+        `supports_streaming` / `supports_partial_results` were added rather than
+        overloading the existing `streaming` flag, because the old flag only ever
+        meant "produces output progressively" and cannot distinguish a provider
+        that accepts live frames from one that can emit partials. Both new keys
+        default to False, so every pre-existing descriptor keeps its meaning --
+        which is what makes this an additive change instead of a silent one.
+        """
+
         payload = FasterWhisperASR.descriptor().to_dict()
         assert set(payload) == {
             "devices",
@@ -158,10 +168,37 @@ class TestLocalProviderDeclarations:
             "requires_network",
             "streaming",
             "supports_cancellation",
+            "supports_partial_results",
+            "supports_streaming",
             "tags",
             "version",
             "voices",
-        }, "the 20-key descriptor contract changed"
+        }, "the 22-key descriptor contract changed"
+
+    def test_capability_flags_are_additive_not_aspirational(self) -> None:
+        """A turn-based provider must not claim duplex capabilities.
+
+        The two new flags default to False. If a future refactor changes that
+        default, every provider that did not opt in would start advertising
+        capabilities it does not have -- and selection would route barge-in
+        traffic to an engine that cannot answer it.
+        """
+
+        faster = FasterWhisperASR.descriptor()
+        kokoro = KokoroTTS.descriptor()
+        for descriptor in (faster, kokoro):
+            assert descriptor.supports_streaming is False, descriptor.id
+            assert descriptor.supports_partial_results is False, descriptor.id
+
+        # The streaming provider opts in explicitly, and it is the only one.
+        from local_voice_companion.providers.local.sherpa_streaming_asr import (
+            SherpaStreamingASR,
+        )
+
+        sherpa = SherpaStreamingASR.descriptor()
+        assert sherpa.supports_streaming is True, sherpa.id
+        assert sherpa.supports_partial_results is True, sherpa.id
+        assert sherpa.streaming is True, "supports_* must not replace `streaming`"
 
     def test_streaming_is_declared_honestly(self) -> None:
         """Both engines are single-pass; claiming otherwise misleads callers."""

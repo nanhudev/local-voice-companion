@@ -29,10 +29,12 @@ from . import runtime_probe
 from .faster_whisper_asr import FasterWhisperASR
 from .kokoro_tts import KokoroTTS
 from .model_store import MODEL_ROOT, ModelArtifact, ModelBundle, ModelStore, default_store
+from .sherpa_streaming_asr import SherpaStreamingASR
 
 NATIVE_PROVIDERS = (
     FasterWhisperASR,
     KokoroTTS,
+    SherpaStreamingASR,
 )
 
 __all__ = [
@@ -43,6 +45,7 @@ __all__ = [
     "ModelBundle",
     "ModelStore",
     "NATIVE_PROVIDERS",
+    "SherpaStreamingASR",
     "default_store",
     "runtime_probe",
 ]

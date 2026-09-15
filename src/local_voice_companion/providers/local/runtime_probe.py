@@ -256,6 +256,47 @@ def probe_kokoro_onnx() -> RuntimeStatus:
     )
 
 
+def probe_sherpa_onnx() -> RuntimeStatus:
+    """Streaming ASR + VAD runtime.
+
+    Unlike the other engines this one is not probed through onnxruntime:
+    sherpa-onnx statically links its own build of ORT into ``_sherpa_onnx``, so
+    ``probe_onnxruntime()`` here would report on a copy of ORT that sherpa never
+    loads and say nothing useful. What actually matters is that the extension
+    imports and exposes the streaming entry point.
+    """
+
+    if not module_present("sherpa_onnx"):
+        return RuntimeStatus(
+            STATUS_DEPENDENCY_MISSING,
+            package="sherpa-onnx",
+            detail="sherpa-onnx is not installed",
+        )
+    try:
+        import sherpa_onnx  # type: ignore[import-not-found]
+
+        version = getattr(sherpa_onnx, "__version__", "") or package_version("sherpa-onnx")
+        has_streaming = hasattr(sherpa_onnx, "OnlineRecognizer")
+    except Exception as exc:  # noqa: BLE001
+        return RuntimeStatus(
+            STATUS_RUNTIME_IMPORT_FAILED,
+            package="sherpa-onnx",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    if not has_streaming:
+        return RuntimeStatus(
+            STATUS_RUNTIME_UNAVAILABLE,
+            package="sherpa-onnx",
+            detail="sherpa_onnx.OnlineRecognizer is missing; install sherpa-onnx-core too",
+        )
+    return RuntimeStatus(
+        STATUS_READY,
+        package="sherpa-onnx",
+        detail="sherpa-onnx importable; streaming recogniser available",
+        version=version,
+    )
+
+
 def probe_g2p(backend: str = "misaki") -> RuntimeStatus:
     """Chinese grapheme-to-phoneme front end.
 
@@ -374,4 +415,5 @@ __all__ = [
     "probe_kokoro_onnx",
     "probe_misaki",
     "probe_onnxruntime",
+    "probe_sherpa_onnx",
 ]

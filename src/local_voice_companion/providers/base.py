@@ -10,7 +10,11 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
-from typing import Any, AsyncIterator, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterable, Mapping, Sequence
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only imports
+    from ..core.audio import AudioFrame
+    from ..core.transcriber import TranscriptUpdate
 
 from ..core.cancellation import CancellationToken
 from ..core.errors import ProviderLoadError, ProviderUnavailable
@@ -36,6 +40,17 @@ class ProviderDescriptor:
     languages: tuple[str, ...] = ()
     devices: tuple[Device, ...] = (Device.CPU,)
     streaming: bool = False
+    # Two finer-grained streaming facts. `streaming` only ever meant "produces
+    # output progressively", which is not enough to answer the questions duplex
+    # actually asks:
+    #   supports_streaming       -> consumes audio that is still arriving
+    #   supports_partial_results -> emits hypotheses before audio ends
+    # A provider can have either without the other (a turn-based engine that is
+    # fed frames still has no partials), so they are separate flags rather than
+    # one overloaded one. Both default to False, which is additive: every
+    # existing descriptor keeps its meaning.
+    supports_streaming: bool = False
+    supports_partial_results: bool = False
     # Resource envelope used by the PipelineResourcePlanner.
     estimated_ram_mb: int = 0
     estimated_vram_mb: int = 0
@@ -248,6 +263,44 @@ class ASRProvider(BaseProvider):
         raise RuntimeError(
             f"{self.descriptor().id} does not implement stream(); check streaming=False"
         )
+
+    async def stream_transcribe(
+        self,
+        frames: AsyncIterator["AudioFrame"],
+        *,
+        language: str = "",
+        model: str | None = None,
+        token: CancellationToken | None = None,
+    ) -> AsyncIterator["TranscriptUpdate"]:
+        """Transcribe audio that is still arriving, yielding intermediate results.
+
+        The default implementation does not pretend to stream: it buffers every
+        frame, calls :meth:`transcribe` once, and yields exactly one final update.
+        That keeps the contract uniform -- callers never branch on provider type --
+        while staying honest about capability. A provider whose descriptor says
+        ``supports_partial_results = False`` yields no partials rather than
+        manufacturing them by chopping up a whole-utterance result.
+
+        Subclasses set `closed` implicitly: iteration ends when `frames` ends.
+        """
+
+        # Both imports are deliberately function-local, not TYPE_CHECKING-only:
+        # the default implementation below *uses* TranscriptUpdate at runtime, and
+        # putting it behind a typing guard turns a working path into NameError.
+        from ..core.audio import concat_frames
+        from ..core.transcriber import TranscriptUpdate
+
+        collected: list[AudioFrame] = []
+        async for frame in frames:
+            if token is not None and token.cancelled:
+                return
+            collected.append(frame)
+        if not collected:
+            return
+        text = await self.transcribe(
+            concat_frames(collected), language=language, model=model, token=token
+        )
+        yield TranscriptUpdate(text=text, committed=text, unstable="", is_final=True)
 
     def supports(self, language: str) -> bool:
         from ..core.types import language_matches
