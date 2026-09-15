@@ -203,6 +203,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks.append(("Config schema", True, f"v{config.schema_version} ({config.server.host}:{config.server.port})"))
     checks.append(("Data root", DEFAULT_LAYOUT.writable, str(DEFAULT_LAYOUT.root)))
 
+    # Native voice providers get their own section because they are the part of
+    # the install most likely to be half-configured: the Python package can be
+    # present while the weights are not, and "installed" would then be a
+    # misleading green tick.
+    native_lines: list[str] = []
+    for label, probe_fn in _native_checks():
+        try:
+            line = probe_fn()
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not crash
+            line = (label, False, f"probe raised {type(exc).__name__}: {exc}")
+        native_lines.append(line)
+
+    for label, ok, detail in native_lines:
+        checks.append((f"Native {label}", ok, detail))
+
     print(f"Data root: {DEFAULT_LAYOUT.root} ({DEFAULT_LAYOUT.note})")
     print(f"Fingerprint: {capabilities['fingerprint']}")
     if capabilities["gpu"]:
@@ -230,6 +245,41 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def _native_checks() -> list[tuple[str, Any]]:
+    """Importable-in-isolation probes for the native providers.
+
+    Wrapped in functions so that a missing optional dependency degrades to a
+    FAIL line with an install hint instead of an ImportError that aborts the
+    whole diagnostic.
+    """
+
+    def asr() -> tuple[str, bool, str]:
+        from local_voice_companion.providers.local import FasterWhisperASR
+
+        ok, reason = FasterWhisperASR.availability()
+        return ("ASR (faster-whisper)", ok, reason if ok else f"{reason}")
+
+    def tts() -> tuple[str, bool, str]:
+        from local_voice_companion.providers.local.kokoro_tts import KokoroTTS
+        from local_voice_companion.providers.local.model_store import default_store
+
+        store = default_store()
+        if store.is_ready("kokoro-v1.1-zh"):
+            return ("TTS (Kokoro zh)", True, "weights present")
+        return ("TTS (Kokoro zh)", False, store.fetch_hint("kokoro-v1.1-zh"))
+
+    def g2p() -> tuple[str, bool, str]:
+        from local_voice_companion.providers.local import runtime_probe
+
+        status = runtime_probe.probe_g2p("misaki")
+        detail = status.detail
+        if not status.ok and status.status == runtime_probe.STATUS_DEPENDENCY_MISSING:
+            detail = f"{detail}; run: pip install 'misaki[zh]'"
+        return ("Chinese G2P (misaki)", status.ok, detail)
+
+    return [("ASR", asr), ("TTS", tts), ("G2P", g2p)]
+
+
 def cmd_where(args: argparse.Namespace) -> int:
     from local_voice_companion.config.paths import describe
 
@@ -240,6 +290,151 @@ def cmd_where(args: argparse.Namespace) -> int:
     for key, value in payload.items():
         print(f"{key}: {value}")
     return 0
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    """Inspect and fetch model artefacts.
+
+    `list` and `status` are read-only and never touch the network. `fetch` is
+    the only operation that downloads, and it is never invoked implicitly --
+    that separation is the whole reason this command exists.
+    """
+
+    from local_voice_companion.providers.local.model_store import default_store
+
+    store = default_store()
+
+    if args.models_command == "list":
+        bundles = store.bundles() if not args.model_id else [store.bundle(args.model_id)]
+        if args.json:
+            _json(
+                [
+                    {
+                        "model_id": bundle.model_id,
+                        "directory": str(store.directory(bundle.model_id)),
+                        "estimated_mb": bundle.total_estimated_mb(),
+                        "license": bundle.license_id,
+                        "homepage": bundle.homepage,
+                        "ready": store.is_ready(bundle.model_id),
+                    }
+                    for bundle in bundles
+                ]
+            )
+            return 0
+        print(f"Model root: {store.root}")
+        for bundle in bundles:
+            state = "ready" if store.is_ready(bundle.model_id) else "not installed"
+            print(
+                f"[{state:>13}] {bundle.model_id:<22} ~{bundle.total_estimated_mb():>4} MB  "
+                f"{bundle.license_id}"
+            )
+            if bundle.notes:
+                print(f"{'':>15}{bundle.notes}")
+        return 0
+
+    if args.models_command == "status":
+        payload = [store.status(bundle.model_id) for bundle in store.bundles()]
+        if args.model_id:
+            payload = [store.status(args.model_id)]
+        if args.json:
+            _json(payload)
+            return 0
+        missing = 0
+        for record in payload:
+            mark = "OK" if record["ready"] else "MISSING"
+            if not record["ready"]:
+                missing += 1
+            print(f"[{mark:>7}] {record['model_id']}")
+            print(f"          directory: {record['directory']}")
+            print(f"          present:   {', '.join(record['present']) or '(none)'}")
+            if record["missing"]:
+                print(f"          missing:   {', '.join(record['missing'])}")
+                print(f"          fix:       {record['fetch_command']}")
+        return 0
+
+    if args.models_command == "fetch":
+        targets = [args.model_id] if args.model_id else [b.model_id for b in store.bundles()]
+        if not targets:
+            print("no model id given and the catalogue is empty", file=sys.stderr)
+            return 2
+        exit_code = 0
+        for model_id in targets:
+            try:
+                records = store.fetch(
+                    model_id, dry_run=args.dry_run, force=args.force, progress=_progress
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, not raised at the CLI
+                print(f"[FAIL] {model_id}: {exc}", file=sys.stderr)
+                exit_code = 1
+                continue
+            already = sum(1 for r in records if r["status"] == "already-present")
+            done = sum(1 for r in records if r["status"] == "downloaded")
+            would = sum(1 for r in records if r["status"] == "would-download")
+            if args.dry_run:
+                for record in records:
+                    print(f"  would download {record['file']} (~{record['min_bytes'] // 2**20} MB)")
+                print(f"{model_id}: {would} file(s) needed")
+                if would:
+                    needed = records[0].get("needed_bytes") or 0
+                    free = records[0].get("free_bytes") or 0
+                    enough = records[0].get("enough_space", True)
+                    print(
+                        f"  disk: ~{needed // 2**20} MB needed, "
+                        f"~{free // 2**20} MB free ({'ok' if enough else 'NOT ENOUGH'})"
+                    )
+                    if not enough:
+                        exit_code = 1
+            else:
+                print(f"{model_id}: {done} downloaded, {already} already present")
+        return exit_code
+
+    return 2
+
+
+def _progress(filename: str, written: int, total: int) -> None:
+    """Single-line progress that stays readable in a redirected log."""
+
+    if total <= 0:
+        return
+    percent = 100.0 * written / total
+    sys.stderr.write(f"\r  {filename}: {percent:5.1f}%  ({written // 2**20} MB)")
+    if written >= total:
+        sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Measure real latency for the selected pipeline.
+
+    Reports median/min/max over warm runs, and labels the measurement source.
+    A machine without a native engine still gets a report, but every number in
+    it is marked `simulated` -- see docs/BENCHMARKING.md.
+    """
+
+    from local_voice_companion.config.loader import load_config
+    from local_voice_companion.hardware.probe import probe_hardware
+    from local_voice_companion.observability.benchmark_runner import run_benchmarks
+    from local_voice_companion.providers import ensure_builtin_providers
+
+    registry = ensure_builtin_providers()
+    profile = probe_hardware(include_audio=False)
+    config = load_config()
+    report = asyncio.run(
+        run_benchmarks(
+            profile,
+            config,
+            policy=args.policy,
+            runs=args.runs,
+            warmup=args.warmup,
+            only=tuple(args.only) if args.only else (),
+            reg=registry,
+        )
+    )
+    if args.json:
+        _json(report.to_dict())
+    else:
+        print(report.render())
+    return 0 if report.succeeded else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -278,6 +473,36 @@ def build_parser() -> argparse.ArgumentParser:
     where = sub.add_parser("where", help="show resolved filesystem layout")
     where.add_argument("--json", action="store_true")
     where.set_defaults(func=cmd_where)
+
+    models = sub.add_parser("models", help="inspect and fetch local model weights")
+    models.set_defaults(func=cmd_models)
+    models_sub = models.add_subparsers(dest="models_command", required=True)
+
+    models_list = models_sub.add_parser("list", help="show the model catalogue")
+    models_list.add_argument("model_id", nargs="?")
+    models_list.add_argument("--json", action="store_true")
+    models_list.set_defaults(func=cmd_models)
+
+    models_status = models_sub.add_parser("status", help="show what is installed")
+    models_status.add_argument("model_id", nargs="?")
+    models_status.add_argument("--json", action="store_true")
+    models_status.set_defaults(func=cmd_models)
+
+    models_fetch = models_sub.add_parser("fetch", help="download missing weights")
+    models_fetch.add_argument("model_id", nargs="?")
+    models_fetch.add_argument("--dry-run", action="store_true")
+    models_fetch.add_argument("--force", action="store_true")
+    models_fetch.set_defaults(func=cmd_models)
+
+    benchmark = sub.add_parser(
+        "benchmark", help="measure real latency for the selected pipeline"
+    )
+    benchmark.add_argument("--policy")
+    benchmark.add_argument("--runs", type=int, default=3)
+    benchmark.add_argument("--warmup", type=int, default=1)
+    benchmark.add_argument("--only", action="append", choices=["asr", "llm", "tts"])
+    benchmark.add_argument("--json", action="store_true")
+    benchmark.set_defaults(func=cmd_benchmark)
 
     return parser
 
