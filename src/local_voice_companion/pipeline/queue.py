@@ -39,17 +39,37 @@ class QueueStats:
 class BoundedQueue(Generic[T]):
     """Capacity-limited queue with a policy for what happens when it is full."""
 
-    def __init__(self, capacity: int, *, policy: DropPolicy = "oldest", name: str = "") -> None:
+    def __init__(
+        self,
+        capacity: int,
+        *,
+        policy: DropPolicy = "oldest",
+        name: str = "",
+        reserved: int = 0,
+    ) -> None:
         if capacity < 1:
             raise ValueError("capacity must be >= 1")
-        self._queue: asyncio.Queue[T] = asyncio.Queue(maxsize=capacity)
+        if reserved < 0:
+            raise ValueError("reserved must be >= 0")
+        # `reserved` slots exist so a control item -- an end-of-stream marker --
+        # can always be enqueued. Without them, closing a full queue makes the
+        # drop policy treat the marker as one more payload frame and evict real
+        # audio that had already arrived.
+        self._capacity = capacity
+        self._queue: asyncio.Queue[T] = asyncio.Queue(maxsize=capacity + reserved)
         self.policy: DropPolicy = policy
         self.name = name
+        self.reserved = reserved
         self.stats = QueueStats(capacity=capacity)
 
     @property
     def capacity(self) -> int:
-        return self._queue.maxsize
+        return self._capacity
+
+    def _payload_full(self) -> bool:
+        """Full for payload purposes. Reserved slots are not payload space."""
+
+        return self._queue.qsize() >= self._capacity
 
     def empty(self) -> bool:
         return self._queue.empty()
@@ -57,11 +77,21 @@ class BoundedQueue(Generic[T]):
     def qsize(self) -> int:
         return self._queue.qsize()
 
-    async def put(self, item: T) -> bool:
-        """Enqueue without blocking the producer. Returns False if dropped."""
+    async def put(self, item: T, *, force: bool = False) -> bool:
+        """Enqueue without blocking the producer. Returns False if dropped.
 
-        if not self._queue.full():
-            self._queue.put_nowait(item)
+        ``force=True`` places the item in the reserved space, bypassing the drop
+        policy. It exists so that *control* items -- end-of-stream markers,
+        cancellation notices -- can never be the reason a payload item is lost.
+        """
+
+        if force or not self._payload_full():
+            try:
+                self._queue.put_nowait(item)
+            except asyncio.QueueFull:  # pragma: no cover - only if force over-reserves
+                self.stats.dropped += 1
+                self.stats.last_overflow = time.monotonic()
+                return False
             self.stats.enqueued += 1
             self._sync_depth()
             return True

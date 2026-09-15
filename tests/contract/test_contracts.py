@@ -50,6 +50,8 @@ class TestProviderDescriptorContract:
         "languages",
         "devices",
         "streaming",
+        "supports_streaming",
+        "supports_partial_results",
         "estimated_ram_mb",
         "estimated_vram_mb",
         "estimated_disk_mb",
