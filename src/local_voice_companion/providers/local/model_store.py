@@ -267,9 +267,18 @@ class ModelStore:
                             if progress is not None:
                                 progress(artifact.filename, written, declared or written)
                 if written < artifact.min_bytes:
+                    # Two very different causes produce this message, and the old
+                    # wording blamed only one of them: the mirror can serve an
+                    # LFS pointer or a truncated body, *or* the catalog's floor
+                    # can simply be wrong. Sending users to hunt for a mirror
+                    # problem when the number in this file is the bug wastes the
+                    # only clue they get.
                     raise ProviderUnavailable(
                         f"{artifact.filename} is only {written} bytes, expected at least "
-                        f"{artifact.min_bytes}. The mirror may be serving an LFS pointer.",
+                        f"{artifact.min_bytes} (declared: "
+                        f"{declared if declared else 'unknown'}). Either the download is "
+                        f"truncated / is an LFS pointer, or the min_bytes floor for this "
+                        f"artifact is set above its real size -- check both.",
                         model_id=model_id,
                         file=artifact.filename,
                     )
@@ -329,7 +338,12 @@ BUNDLES: tuple[ModelBundle, ...] = (
                 url="https://huggingface.co/Systran/faster-whisper-base/resolve/main/model.bin",
                 # Observed 145,217,532 bytes. A floor this close to the real size
                 # also catches a truncated transfer, not just an LFS pointer.
-                min_bytes=140 * 1024 * 1024,
+                # Verified by HEAD on 2026-09-15: this file is 145,217,532 bytes
+                # (138 MiB). It was previously floored at 140 MiB, which is
+                # *larger* than the real artifact -- so every fetch failed
+                # validation and the model could never be installed. A floor has
+                # to sit below the thing it guards.
+                min_bytes=128 * 1024 * 1024,
             ),
             ModelArtifact(
                 filename="config.json",
