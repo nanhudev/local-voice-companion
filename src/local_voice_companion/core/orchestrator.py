@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterable, Sequence
@@ -246,12 +247,34 @@ async def transcribe_stream(
     return transcript.strip()
 
 
+def _settle_state(
+    session: Session, timeline: TurnTimeline, target: TurnState, detail: str = ""
+) -> bool:
+    """Move the session state only while `timeline` is still the current turn.
+
+    A superseded turn keeps running for a moment after the next one has begun --
+    it is mid-`await`, and unwinding takes a loop turn or two. If it were
+    allowed to move the state machine on the way out, a barge-in would settle
+    into LISTENING *after* its replacement had already reached SPEAKING, and the
+    client would be told to stop listening to audio that had barely started.
+    """
+
+    if session.active_timeline is not timeline:
+        return False
+    return session.set_state(target, detail)
+
+
 async def run_turn(session: Session, pipeline: Pipeline, request: TurnRequest) -> TurnResult:
     """Execute a complete conversational turn."""
 
     timeline, token = session.begin_turn()
     result = TurnResult(turn_id=timeline.turn_id, timeline=timeline)
     language = request.language or session.language
+
+    def finish(status: str) -> None:
+        """Report this turn's outcome without disturbing a newer one."""
+
+        session.finish_turn(status, timeline)
 
     try:
         if request.frames is not None:
@@ -299,8 +322,8 @@ async def run_turn(session: Session, pipeline: Pipeline, request: TurnRequest) -
                     {"text": "", "too_short": True},
                     turn_id=timeline.turn_id,
                 )
-                session.set_state(TurnState.LISTENING)
-                session.finish_turn("ignored")
+                _settle_state(session, timeline, TurnState.LISTENING)
+                finish("ignored")
                 return result
             result.transcript = transcript
             session.last_transcript = transcript
@@ -319,19 +342,19 @@ async def run_turn(session: Session, pipeline: Pipeline, request: TurnRequest) -
         session.last_reply = reply
         session.append("assistant", reply)
         timeline.mark("playback_end")
-        session.set_state(TurnState.LISTENING)
-        session.finish_turn("completed")
+        _settle_state(session, timeline, TurnState.LISTENING)
+        finish("completed")
         return result
 
     except CancelledTurn as exc:
         result.cancelled = True
         result.error = str(exc)
-        session.set_state(TurnState.LISTENING, detail=str(exc))
-        session.finish_turn("cancelled")
+        _settle_state(session, timeline, TurnState.LISTENING, detail=str(exc))
+        finish("cancelled")
         return result
     except asyncio.CancelledError:
-        session.set_state(TurnState.LISTENING, detail="task cancelled")
-        session.finish_turn("cancelled")
+        _settle_state(session, timeline, TurnState.LISTENING, detail="task cancelled")
+        finish("cancelled")
         raise
     except Exception as exc:  # noqa: BLE001 - surfaced as a typed wire error below
         result.error = f"{type(exc).__name__}: {exc}"
@@ -340,8 +363,8 @@ async def run_turn(session: Session, pipeline: Pipeline, request: TurnRequest) -
             {"message": str(exc), "error_type": type(exc).__name__},
             turn_id=timeline.turn_id,
         )
-        session.set_state(TurnState.ERROR, detail=str(exc))
-        session.finish_turn("failed")
+        _settle_state(session, timeline, TurnState.ERROR, detail=str(exc))
+        finish("failed")
         return result
 
 
@@ -429,42 +452,93 @@ async def _generate_and_speak(
     spoken: list[str] = []
     first = True
 
+    # Bound on how long the emitter may take to notice a cancellation and report
+    # `playback.stopped`. It should be one event-loop turn; a quarter second is
+    # the point at which waiting stops being useful and starts delaying the user
+    # who is already talking.
+    emit_grace_s = 0.25
     try:
-        async for delta in pipeline.llm.stream(
-            messages,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            token=token,
-        ):
-            token.raise_if_cancelled()
-            if first:
-                timeline.mark("llm_first_token")
-                session.set_state(TurnState.SYNTHESIZING)
-                first = False
-            pieces.append(delta)
-            session.emit(
-                EventType.LLM_DELTA, {"text": delta, "full": "".join(pieces)}, turn_id=timeline.turn_id
-            )
-            for chunk in chunker.push(delta):
+        try:
+            async for delta in pipeline.llm.stream(
+                messages,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                token=token,
+            ):
+                token.raise_if_cancelled()
+                if first:
+                    timeline.mark("llm_first_token")
+                    _settle_state(session, timeline, TurnState.SYNTHESIZING)
+                    first = False
+                pieces.append(delta)
+                session.emit(
+                    EventType.LLM_DELTA, {"text": delta, "full": "".join(pieces)}, turn_id=timeline.turn_id
+                )
+                for chunk in chunker.push(delta):
+                    spoken.append(chunk)
+                    await text_queue.put(chunk)
+        finally:
+            for chunk in chunker.flush():
                 spoken.append(chunk)
                 await text_queue.put(chunk)
-    finally:
-        for chunk in chunker.flush():
-            spoken.append(chunk)
-            await text_queue.put(chunk)
-        await text_queue.put(None)
+            await text_queue.put(None)
 
-    timeline.mark("llm_end")
-    reply = "".join(pieces).strip()
-    session.emit(EventType.LLM_COMPLETED, {"text": reply}, turn_id=timeline.turn_id)
+        timeline.mark("llm_end")
+        reply = "".join(pieces).strip()
+        session.emit(EventType.LLM_COMPLETED, {"text": reply}, turn_id=timeline.turn_id)
 
-    await synth_task
-    await audio_queue.put(None)
-    await emit_task
+        await synth_task
+        await audio_queue.put(None)
+        await emit_task
+    except BaseException:
+        # Every exit has to be funnelled here, including the one where the LLM
+        # is still streaming when the interruption lands. If that path skipped
+        # this block, the two workers would be left running with nobody waiting
+        # on them: `playback.stopped` would never be reported, and audio for a
+        # turn that has already completed could still reach the socket.
+        if not token.cancelled:
+            # Not a cancellation, so the emitter is still waiting politely and
+            # only the sentinel will release it.
+            await audio_queue.put(None)
+        await _drain_emitter(emit_task, emit_grace_s)
+        if not synth_task.done():
+            synth_task.cancel()
+        # Awaited even when already finished: a Task that ends with an
+        # exception nobody reads logs "Task exception was never retrieved",
+        # which in a voice runtime reads like a bug in progress reports.
+        with contextlib.suppress(BaseException):
+            await synth_task
+        raise
 
     result.chunks_spoken = len(spoken)
     token.raise_if_cancelled()
     return reply
+
+
+async def _drain_emitter(emit_task: asyncio.Task, timeout: float) -> None:
+    """Let the audio emitter stop on its own, then make sure it is gone.
+
+    The emitter is the only stage that knows whether audio reached the client,
+    so it is the only one that can honestly report `playback.stopped`. Cancelling
+    it outright would lose that report and, worse, leave a window in which a
+    fragment already dequeued could still be written to the socket afterwards.
+    It is given a bounded grace period first, and only then torn down.
+    """
+
+    if not emit_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(emit_task), timeout=timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            emit_task.cancel()
+        except BaseException:  # noqa: BLE001 - handled by the retrieval below
+            pass
+        if not emit_task.done():  # pragma: no cover - grace expired mid-cancel
+            emit_task.cancel()
+    # Always awaited, finished or not: an unread Task exception surfaces later
+    # as "Task exception was never retrieved", far from anything that explains
+    # what actually went wrong.
+    with contextlib.suppress(BaseException):
+        await emit_task
 
 
 async def _synthesis_worker(
@@ -482,10 +556,7 @@ async def _synthesis_worker(
     started = False
     chunks_synthesized = 0
     while True:
-        try:
-            item = await text_queue.get()
-        except asyncio.CancelledError:
-            raise
+        item = await text_queue.get_or_cancel(token)
         if item is None:
             if started:
                 # Symmetry with `llm.completed`: a client tracking synthesis
@@ -520,7 +591,29 @@ async def _audio_emitter(
 
     started = False
     while True:
-        item = await audio_queue.get()
+        try:
+            item = await audio_queue.get_or_cancel(token)
+        except CancelledTurn:
+            if started:
+                # Playback was cut short. The distinction from
+                # `playback.finished` matters to the client: it is holding an
+                # audio device that must be stopped now, not drained politely.
+                timeline.mark("playback_stopped")
+                discarded = len(audio_queue.drain())
+                session.emit(
+                    EventType.PLAYBACK_STOPPED,
+                    {
+                        "bytes": result.audio_bytes,
+                        "discarded": discarded,
+                        "reason": token.reason.code if token.reason else "barge_in",
+                    },
+                    turn_id=timeline.turn_id,
+                )
+            else:
+                # Nothing was ever handed over, so there is nothing to stop --
+                # but stale audio must still not leak, so the queue is dropped.
+                audio_queue.drain()
+            raise
         if item is None:
             if started:
                 # Playback is client-side, so "finished" here means "every
@@ -534,14 +627,10 @@ async def _audio_emitter(
                 )
             return
         audio, fmt = item
-        if token.cancelled:
-            # Never let audio from an interrupted turn reach the client.
-            audio_queue.drain()
-            raise CancelledTurn("audio delivery interrupted")
         if not started:
             timeline.mark("tts_first_audio")
             timeline.mark("playback_start")
-            session.set_state(TurnState.SPEAKING)
+            _settle_state(session, timeline, TurnState.SPEAKING)
             session.emit(EventType.PLAYBACK_STARTED, {}, turn_id=timeline.turn_id)
             started = True
         result.audio_bytes += len(audio)

@@ -36,6 +36,8 @@ class EventType:
     TURN_STATE = "turn.state"
     TURN_CANCELLED = "turn.cancelled"
     TURN_COMPLETED = "turn.completed"
+    # barge-in
+    BARGE_IN_DETECTED = "bargein.detected"
     # asr
     ASR_PARTIAL = "asr.partial"
     ASR_FINAL = "asr.final"
@@ -50,6 +52,10 @@ class EventType:
     # playback
     PLAYBACK_STARTED = "playback.started"
     PLAYBACK_FINISHED = "playback.finished"
+    #: Playback was cut short, not merely finished. A client that only watches
+    #: `turn.cancelled` cannot tell "nothing was playing, nothing to stop" from
+    #: "the speaker is mid-sentence, stop it now", so this is a distinct signal.
+    PLAYBACK_STOPPED = "playback.stopped"
     # observability & errors
     RUNTIME_METRIC = "runtime.metric"
     PROVIDER_STATE = "provider.state"
@@ -164,6 +170,12 @@ TIMELINE_STAGES: tuple[str, ...] = (
     "tts_start",
     "tts_first_audio",
     "playback_start",
+    # Only present when the turn was interrupted. `playback_end` is the natural
+    # end of a spoken turn, so an interrupted one has `playback_stopped` and no
+    # `playback_end` -- which is how a client or a metric tells the two apart
+    # without inspecting the completion status.
+    "bargein_detected",
+    "playback_stopped",
     "playback_end",
 )
 
@@ -243,6 +255,27 @@ class TurnTimeline:
         return self._delta_ms("tts_start", "tts_first_audio")
 
     @property
+    def barge_in_latency_ms(self) -> int | None:
+        """Speech detected -> playback actually stopped.
+
+        This is the number the user feels when they interrupt. It is bounded
+        below by `min_speech_ms`, because that is how long the watcher waits
+        before believing the speech is real; anything above a frame or two on
+        top of that is the pipeline failing to stop promptly.
+        """
+
+        return self._delta_ms("bargein_detected", "playback_stopped")
+
+    @property
+    def playback_ms(self) -> int | None:
+        """How long audio was actually playing before it ended or was cut."""
+
+        for end in ("playback_end", "playback_stopped"):
+            if end in self.marks:
+                return self._delta_ms("playback_start", end)
+        return None
+
+    @property
     def time_to_first_audio_ms(self) -> int | None:
         """The headline metric: speech end -> audible assistant audio."""
 
@@ -258,7 +291,7 @@ class TurnTimeline:
         """
 
         end = None
-        for stage in ("playback_end", "llm_end", "asr_end"):
+        for stage in ("playback_end", "playback_stopped", "llm_end", "asr_end"):
             if stage in self.marks:
                 end = stage
                 break
@@ -276,6 +309,8 @@ class TurnTimeline:
             "llm_ttft_ms": self.llm_ttft_ms,
             "tts_ttfa_ms": self.tts_ttfa_ms,
             "time_to_first_audio_ms": self.time_to_first_audio_ms,
+            "barge_in_latency_ms": self.barge_in_latency_ms,
+            "playback_ms": self.playback_ms,
             "total_turn_ms": self.total_turn_ms,
             "clock_limited": self.clock_limited,
         }
@@ -287,6 +322,7 @@ class TurnTimeline:
             "llm_ttft": self.llm_ttft_ms,
             "tts_ttfa": self.tts_ttfa_ms,
             "time_to_first_audio": self.time_to_first_audio_ms,
+            "barge_in_latency": self.barge_in_latency_ms,
             "total_turn": self.total_turn_ms,
         }
         return {key: value for key, value in derived.items() if value is not None}

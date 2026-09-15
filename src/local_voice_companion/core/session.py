@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from ..bots.schema import BotManifest
-from ..core.audio import InputAudioStream
+from ..core.audio import AudioFrame, InputAudioStream
+from ..core.bargein import BargeInConfig, BargeInWatcher
 from ..core.cancellation import CancellationToken
 from ..core.errors import ConfigurationError
 from ..core.events import Event, EventBus, EventType, TurnTimeline
@@ -53,6 +54,10 @@ class Session:
     #: them -- the stream is the handoff point between the two.
     input_stream: InputAudioStream | None = field(default=None, repr=False)
     _input_sample_rate: int = field(default=16000, repr=False)
+    #: Watches the microphone during playback and interrupts on speech. None
+    #: until a caller attaches one, which means "barge-in is not configured"
+    #: and never "barge-in is active and silent".
+    barge_in: BargeInWatcher | None = field(default=None, repr=False)
 
     @classmethod
     def from_bot(cls, bot: BotManifest, **kwargs: Any) -> "Session":
@@ -110,8 +115,18 @@ class Session:
         )
         return timeline, token
 
-    def finish_turn(self, status: str = "completed") -> None:
-        timeline = self.active_timeline
+    def finish_turn(self, status: str = "completed", timeline: TurnTimeline | None = None) -> None:
+        """Close out a turn.
+
+        The caller passes *its own* timeline so that a superseded turn unwinding
+        late cannot clear the turn that replaced it. Without that identity
+        check, a barge-in unwinds into `finish_turn("cancelled")` a few
+        milliseconds after the next turn has already begun and wipes the new
+        turn's timeline and token -- after which `cancel()` and `vad_end`
+        silently stop working for the turn the user is actually in.
+        """
+
+        timeline = timeline or self.active_timeline
         self.bus.emit(
             EventType.TURN_COMPLETED,
             session_id=self.id,
@@ -126,9 +141,14 @@ class Session:
                     turn_id=timeline.turn_id,
                     data={"metric": name, "value_ms": value},
                 )
-        self.active_timeline = None
-        self.active_token = None
-        self.input_stream = None
+        if timeline is None or self.active_timeline is timeline:
+            self.active_timeline = None
+            self.active_token = None
+            self.input_stream = None
+        if self.barge_in is not None:
+            # The next playback episode gets a fresh accumulator and a fresh
+            # cooldown, so a turn must not inherit the previous one's state.
+            self.barge_in.reset()
 
     # -- live audio input --------------------------------------------------
 
@@ -144,13 +164,53 @@ class Session:
         self.input_stream = InputAudioStream(capacity=capacity, name=f"mic-{self.id}")
         return self.input_stream
 
+    def attach_barge_in(
+        self, vad: Any, config: BargeInConfig | None = None
+    ) -> BargeInWatcher | None:
+        """Give the session the means to interrupt itself.
+
+        Passing `vad=None` is meaningful: it detaches the watcher and leaves the
+        session with no barge-in at all. A session must never look armed while
+        holding a VAD it cannot use.
+        """
+
+        self.barge_in = None if vad is None else BargeInWatcher(self, vad, config or BargeInConfig())
+        return self.barge_in
+
+    @property
+    def listening_for_barge_in(self) -> bool:
+        """Whether a frame sent right now would be examined for interruption."""
+
+        return self.barge_in is not None and self.barge_in.armed
+
     async def push_audio(self, pcm: bytes, sample_rate: int | None = None) -> bool:
-        """Hand one PCM slice to the active turn. False means it was dropped."""
+        """Hand one PCM slice to the runtime. False means nobody wanted it.
+
+        A frame has two possible destinations and may have both:
+
+        * the active turn, when an utterance stream is open (this is what the
+          recogniser consumes);
+        * the barge-in watcher, whenever the assistant is producing audio --
+          which is the only time the microphone is interesting outside an
+          utterance.
+        """
 
         stream = self.input_stream
-        if stream is None or stream.closed:
+        utterance_open = stream is not None and not stream.closed
+        if not utterance_open and not self.listening_for_barge_in:
             return False
-        return await stream.put_pcm(pcm, sample_rate or self._input_sample_rate)
+
+        rate = sample_rate or self._input_sample_rate
+        frame = (
+            stream.frame(pcm, rate) if stream is not None else AudioFrame(pcm=pcm, sample_rate=rate)
+        )
+
+        accepted = True
+        if utterance_open:
+            accepted = await stream.put(frame)  # type: ignore[union-attr]
+        if self.barge_in is not None:
+            self.barge_in.observe(frame)
+        return accepted
 
     async def end_input_stream(self) -> bool:
         """Close capture and stamp `vad_end`.
@@ -167,6 +227,33 @@ class Session:
         if self.active_timeline is not None:
             self.active_timeline.mark("vad_end")
         await stream.close()
+        return True
+
+    async def settle(self, timeout: float = 0.25) -> bool:
+        """Give an outgoing turn a bounded chance to finish unwinding.
+
+        Starting the next turn before the previous one has stopped writing is
+        what makes two turns overlap: both hold a timeline, both emit, and the
+        one that unwinds last wins. The timeout is a bound, not an expectation
+        -- a turn that ignores its token for a quarter of a second is not going
+        to honour it a second later, and waiting longer would only stall the
+        user who is already talking.
+
+        Returns True when the previous turn is done, False when it has overrun.
+        """
+
+        task = self.active_turn
+        if task is None or task.done():
+            return True
+        try:
+            # `shield` so that timing out does not cancel the turn itself --
+            # cancelling from here would make the caller unable to tell "it
+            # finished" from "I killed it".
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            return False
+        except Exception:  # noqa: BLE001 - the turn's failure is its own business
+            return True
         return True
 
     def cancel(self, detail: str = "barge-in", code: str = "barge_in") -> bool:

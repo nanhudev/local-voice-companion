@@ -109,14 +109,97 @@ Two deliberate decisions, both about not lying with numbers:
 
 ---
 
+## 3B — Barge-in: DONE (measured end to end)
+
+The user starts talking while the assistant is still talking, and playback stops.
+
+This is **pipeline-level** interruption, not a duplex model. A model that listens
+and speaks at the same instant needs 18–24 GB of VRAM
+(`docs/DUPLEX_FEASIBILITY.md`); this machine has 7.2 GB free.
+
+### How it works
+
+`core/bargein.py` holds a `BargeInWatcher` fed one frame at a time from
+`Session.push_audio`. It fires when:
+
+1. the session is in `SPEAKING` or `SYNTHESIZING` — the only states in which
+   user speech is an interruption rather than the turn's own input;
+2. the loaded VAD is actually serving. **A VAD that is absent, failed to load,
+   or disabled does not fall back to guessing from energy.** The watcher reports
+   itself unavailable, and `Session.listening_for_barge_in` is False.
+3. `min_speech_ms` of *continuous* speech has been seen, measured in **audio
+   time** (each frame contributes its own duration) rather than wall-clock time.
+   Wall-clock would let a queue stall or a GC pause look like a long utterance,
+   which is how a cough becomes an interruption.
+4. the cooldown window since `playback_start` has expired. This exists because
+   the speaker's own attack transient and its echo live there. **A cooldown is a
+   mitigation for speaker use, not a substitute for AEC** — that is 3D.
+
+One interruption per turn. A second `bargein.detected` for something already
+reported would make any latency histogram meaningless.
+
+### What the client sees
+
+```
+bargein.detected  {"speech_ms": 100.0, "state": "SPEAKING"}
+turn.cancelled    {"reason": "barge_in"}
+playback.stopped  {"bytes": 6956, "discarded": 0, "reason": "barge_in"}
+turn.completed    {"status": "cancelled"}
+```
+
+`playback.stopped` is deliberately **not** `turn.cancelled`. A client watching
+only the latter cannot distinguish "nothing was playing, nothing to stop" from
+"the speaker is mid-sentence, stop it now", and it holds the audio device.
+
+New timeline stages: `bargein_detected`, `playback_stopped`. An interrupted turn
+has `playback_stopped` and **no** `playback_end`; a normal one has `playback_end`
+and no `playback_stopped`. New metric: `barge_in_latency_ms`.
+
+### Three real defects found while building it
+
+These were not hypothetical; each one was reproduced first.
+
+1. **Cancellation did not stop playback.** Both pipeline stages used
+   `await queue.get()`, so a cancelled stage stayed asleep until the next item
+   happened to arrive — the interruption was audible as a delay.
+   `BoundedQueue.get_or_cancel()` now races the queue against the token.
+2. **The audio emitter was left running when the LLM was still streaming.**
+   A barge-in lands during generation far more often than between chunks, and
+   that path skipped the cleanup entirely: no `playback.stopped`, an orphaned
+   task, and "Task exception was never retrieved" logged far from the cause.
+   Every exit now funnels through one handler that drains both workers.
+3. **A late-unwinding turn wiped the turn that replaced it.** After a barge-in
+   the new turn begins while the old coroutine is still unwinding, and
+   `finish_turn()` cleared `active_timeline` and `active_token` — belonging to
+   the *new* turn. After that, `cancel()` and `vad_end` silently stopped
+   working for the turn the user was actually in. `finish_turn` now takes the
+   caller's own timeline and only clears it if it is still current; state
+   changes go through the same identity check.
+
+### Note on getting here
+
+A full-suite run took **12+ minutes instead of ~2** during development. The
+cause was a `NameError` in the websocket handler from a bad rename: the broad
+`except Exception` turned it into an `error` frame, the client kept waiting for
+`turn.completed`, and every websocket test then hung until timeout. Lesson:
+`pytest … | tail` reports `tail`'s exit code, so a *timed-out* file looked like
+a pass, and a per-file bisect using it reported every file green.
+
+Tests: **304 passed, 0 skipped, two consecutive runs** (was 278). The 26 new
+cases cover the watcher's hysteresis, its gating, its honest absence, and a real
+interruption over the websocket, including that no `tts.audio` arrives after
+`playback.stopped`.
+
+---
+
 ## What is NOT done
 
 | Step | State | Note |
 |---|---|---|
 | 3A — `asr.partial` into the API/WS | **DONE** | Emitted on both the live-frame path and the one-shot buffer path. |
 | 3A — real TTFP measurement with sherpa on live audio | NOT DONE | The 480–800 ms figure above is "audio consumed before first text" from the benchmark, not a websocket round trip. |
-| 3B — barge-in | NOT STARTED | |
-| 3C — duplex arbitration | NOT STARTED | |
+| 3B — barge-in | **DONE** | Headset path. Cooldown mitigates speaker echo; real speaker barge-in still needs AEC (3D). |
+| 3C — duplex arbitration | NOT STARTED | Today an interruption *stops* the turn. Deciding whether to start a new one from the interrupting audio is next. |
 | 3D — AEC | NOT STARTED | Headset first; speaker AEC must not block the phase. |
 | 3E — pause / backchannel | NOT STARTED | |
 | 3F — performance | NOT STARTED | |

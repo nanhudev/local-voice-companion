@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only imports
+    from ..core.cancellation import CancellationToken
 
 T = TypeVar("T")
 
@@ -142,6 +145,45 @@ class BoundedQueue(Generic[T]):
         self.stats.dequeued += 1
         self._sync_depth()
         return item
+
+    async def get_or_cancel(self, token: CancellationToken) -> T:
+        """Take the next item, or fail the moment the turn is cancelled.
+
+        A bare `await queue.get()` leaves a stage asleep until the next item
+        happens to arrive. On barge-in that is precisely the wrong behaviour:
+        the audio emitter would sit on a half-spoken sentence until the
+        synthesizer happened to produce another chunk, and the interruption
+        would be audible as a delay rather than felt as an interruption.
+
+        Racing the queue against the token makes cancellation take effect
+        within one event-loop turn, which is what the barge-in latency number
+        measures.
+        """
+
+        # Imported here, not at module scope: `core.audio` imports this module,
+        # so a top-level import of `core.*` would close an import cycle.
+        from ..core.errors import CancelledTurn
+
+        token.raise_if_cancelled()
+        getter = asyncio.ensure_future(self._queue.get())
+        waiter = asyncio.ensure_future(token.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {getter, waiter}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except BaseException:  # pragma: no cover - outer cancellation
+            getter.cancel()
+            waiter.cancel()
+            raise
+        for task in pending:
+            task.cancel()
+        if getter in done:
+            self.stats.dequeued += 1
+            self._sync_depth()
+            return getter.result()
+        # The loser may have been cancelled mid-retrieval, so an item can be
+        # lost here. That is accepted: the turn is over and its audio is stale.
+        raise CancelledTurn(token.reason.detail if token.reason else "turn cancelled")
 
     def drain(self) -> list[T]:
         """Drop everything currently queued (used on barge-in)."""

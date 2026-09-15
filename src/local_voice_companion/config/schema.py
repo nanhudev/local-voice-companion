@@ -68,6 +68,11 @@ class AudioConfig(StrictModel):
     max_speech_seconds: float = 12.0
     minimum_rms: int = 420
     silence_after_playback_ms: int = 350
+    # Barge-in. `barge_in_min_speech_ms` defaults to `min_speech_ms` when unset
+    # because both answer the same question -- "how long before this is really
+    # speech" -- and two numbers that can disagree are two ways to be wrong.
+    barge_in_enabled: bool = True
+    barge_in_min_speech_ms: int = 180
 
 
 class PipelineConfig(StrictModel):

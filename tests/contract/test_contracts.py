@@ -318,6 +318,10 @@ class TestEventWireContract:
             "llm_ttft_ms",
             "tts_ttfa_ms",
             "time_to_first_audio_ms",
+            # Present only on interrupted turns, but always present as a key: a
+            # client that switches on the schema must not have to probe for it.
+            "barge_in_latency_ms",
+            "playback_ms",
             "total_turn_ms",
             "clock_limited",
         }
@@ -337,6 +341,8 @@ class TestEventWireContract:
             "tts_start",
             "tts_first_audio",
             "playback_start",
+            "bargein_detected",
+            "playback_stopped",
             "playback_end",
         }
 

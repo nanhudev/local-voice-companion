@@ -24,6 +24,7 @@ from ..bots.store import BotStore, store_summary
 from ..config.loader import load_config, migration_report, save_config
 from ..config.paths import DEFAULT_LAYOUT
 from ..config.schema import SystemConfig, redacted
+from ..core.bargein import BargeInConfig
 from ..core.errors import LVCError, NotFound, ValidationFailed
 from ..core.events import EVENT_SCHEMA_VERSION, EventType
 from ..core.orchestrator import Pipeline, TurnRequest, run_turn
@@ -575,6 +576,15 @@ def create_app(
             await websocket.close(code=4404, reason="unknown session")
             return
         await websocket.accept()
+        # Barge-in needs the pipeline's VAD, so the pipeline is prepared at
+        # connect time rather than on first input: an interruption is only
+        # useful if the watcher is already listening when the user starts
+        # talking, and by then it is too late to load a model.
+        await _ensure_pipeline(app, runtime_state)
+        session.attach_barge_in(
+            runtime_state.pipeline.vad if runtime_state.pipeline else None,
+            _barge_in_config(app),
+        )
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
 
         def forward(event: dict[str, Any]) -> None:
@@ -633,6 +643,35 @@ async def _ensure_pipeline(app: FastAPI, state: RuntimeState) -> None:
     await state.prepare_pipeline()
 
 
+def _barge_in_config(app: FastAPI) -> BargeInConfig:
+    """Tuning for interruption, taken from the same audio block as capture.
+
+    `min_speech_ms` already exists there for endpointing; reusing it keeps one
+    number meaning "how long is real speech" instead of two that can disagree.
+    """
+
+    audio = app.state.config.audio
+    return BargeInConfig(
+        enabled=audio.barge_in_enabled,
+        min_speech_ms=audio.barge_in_min_speech_ms,
+        cooldown_ms=audio.silence_after_playback_ms,
+    )
+
+
+async def _interrupt_for_new_input(session: Session) -> None:
+    """Cancel the running turn, then let it finish unwinding before the next.
+
+    Cancelling alone is not enough: the outgoing turn is suspended mid-`await`
+    and keeps running for a loop turn or two. Starting the replacement
+    immediately means two turns holding a timeline at once, and whichever
+    unwinds last decides what the session looks like afterwards.
+    """
+
+    if session.active_turn is not None and not session.active_turn.done():
+        session.cancel(detail="barge-in: new user input", code="barge_in")
+        await session.settle()
+
+
 async def _pump(websocket: WebSocket, queue: "asyncio.Queue[dict[str, Any]]") -> None:
     while True:
         event = await queue.get()
@@ -672,8 +711,7 @@ async def _handle_client_message(
         await _ensure_pipeline(app, state)
         pipeline = state.pipeline
         assert pipeline is not None
-        if session.active_turn is not None and not session.active_turn.done():
-            session.cancel(detail="barge-in: new user input", code="barge_in")
+        await _interrupt_for_new_input(session)
 
         sample_rate = int(message.get("sample_rate", app.state.config.audio.sample_rate))
         stream = session.open_input_stream(sample_rate)
@@ -683,7 +721,15 @@ async def _handle_client_message(
         return
 
     if kind == "audio.frame":
-        if session.input_stream is None or session.input_stream.closed:
+        # Accepted either into the open utterance (the recogniser's input) or,
+        # when the assistant is the one talking, into the barge-in watcher.
+        # Rejecting the latter would make interruption impossible: the frames
+        # that matter most are exactly the ones that arrive with no turn of
+        # their own to belong to.
+        if not (
+            (session.input_stream is not None and not session.input_stream.closed)
+            or session.listening_for_barge_in
+        ):
             session.emit(
                 EventType.ERROR,
                 {"message": "audio.frame before audio.start (open a stream first)"},
@@ -714,8 +760,7 @@ async def _handle_client_message(
         await _ensure_pipeline(app, state)
         pipeline = state.pipeline
         assert pipeline is not None
-        if session.active_turn is not None and not session.active_turn.done():
-            session.cancel(detail="barge-in: new user input", code="barge_in")
+        await _interrupt_for_new_input(session)
 
         request = _build_turn_request(
             app,
