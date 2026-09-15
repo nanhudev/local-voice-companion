@@ -245,6 +245,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def _elsewhere(model_id: str) -> str:
+    """Where a provider resolves this model from, if not from the store.
+
+    `models list` reports only what the managed store holds. faster-whisper can
+    additionally find weights an earlier download left in the HuggingFace cache,
+    and labelling those "not installed" was actively misleading: it invited
+    re-downloading ~148 MB already present on disk.
+
+    Returns a short label ("hf-cache") or "" when the model is nowhere.
+    """
+
+    if model_id.startswith("faster-whisper"):
+        try:
+            from .providers.local.faster_whisper_asr import FasterWhisperASR
+
+            short = model_id.removeprefix("faster-whisper-")
+            if FasterWhisperASR._find_in_hf_cache(short):
+                return "hf-cache"
+        except Exception:  # noqa: BLE001 - a listing must never fail on this
+            return ""
+    return ""
+
+
 def _native_checks() -> list[tuple[str, Any]]:
     """Importable-in-isolation probes for the native providers.
 
@@ -323,7 +346,16 @@ def cmd_models(args: argparse.Namespace) -> int:
             return 0
         print(f"Model root: {store.root}")
         for bundle in bundles:
-            state = "ready" if store.is_ready(bundle.model_id) else "not installed"
+            ready, elsewhere = store.is_ready(bundle.model_id), _elsewhere(bundle.model_id)
+            if ready:
+                state = "ready"
+            elif elsewhere:
+                # Not in *this* store, but resolvable: the provider finds it in a
+                # cache another tool populated. Reporting only "not installed"
+                # here invites re-downloading weights already on disk.
+                state = "found: " + elsewhere
+            else:
+                state = "not installed"
             print(
                 f"[{state:>13}] {bundle.model_id:<22} ~{bundle.total_estimated_mb():>4} MB  "
                 f"{bundle.license_id}"
@@ -341,16 +373,29 @@ def cmd_models(args: argparse.Namespace) -> int:
             return 0
         missing = 0
         for record in payload:
-            mark = "OK" if record["ready"] else "MISSING"
-            if not record["ready"]:
+            elsewhere = _elsewhere(record["model_id"])
+            if record["ready"]:
+                mark = "OK"
+            elif elsewhere:
+                # Usable as-is: another cache already has it. Counting this as
+                # missing would make `models status` exit nonzero for a machine
+                # that is perfectly able to run, and would point at a redundant
+                # download.
+                mark = f"FOUND:{elsewhere}"
+            else:
+                mark = "MISSING"
                 missing += 1
             print(f"[{mark:>7}] {record['model_id']}")
             print(f"          directory: {record['directory']}")
             print(f"          present:   {', '.join(record['present']) or '(none)'}")
             if record["missing"]:
                 print(f"          missing:   {', '.join(record['missing'])}")
-                print(f"          fix:       {record['fetch_command']}")
-        return 0
+                if elsewhere:
+                    print(f"          note:      not needed -- resolvable from the {elsewhere};")
+                    print(f"                     fetching would duplicate existing weights")
+                else:
+                    print(f"          fix:       {record['fetch_command']}")
+        return 1 if missing else 0
 
     if args.models_command == "fetch":
         targets = [args.model_id] if args.model_id else [b.model_id for b in store.bundles()]
