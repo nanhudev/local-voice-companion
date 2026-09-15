@@ -8,10 +8,13 @@ and then serves conversations over that plan to any client — browser, game
 engine, or another agent.
 
 It is not a wrapper around one engine. Voicebox and Ollama are providers here,
-exactly like the fake providers used in tests are providers.
+exactly like the fake providers used in tests are providers — and so are the two
+native engines that actually run inference in-process.
 
 ## Highlights
 
+- **Real local ASR and TTS** — `faster_whisper_cpu` and `kokoro_tts_cpu` run
+  inference on the CPU with no network and no GPU [1]
 - **Hardware probing** — CPU, RAM, GPU, VRAM, accelerators, and installed
   services, reported rather than assumed
 - **Adaptive selection** — candidates are filtered, scored, and planned into one
@@ -28,6 +31,9 @@ exactly like the fake providers used in tests are providers.
 - Optional Windows GPU worker for split-machine setups
 - Minimal Godot integration example
 
+[1] Both are optional extras so the base install stays light. Neither is the default
+LLM — see the status section.
+
 ## Documentation
 
 | Document | Contents |
@@ -42,20 +48,40 @@ exactly like the fake providers used in tests are providers.
 | [SECURITY.md](docs/SECURITY.md) | Threat model and secret handling |
 | [CURRENT_ARCHITECTURE.md](docs/CURRENT_ARCHITECTURE.md) | PHASE 0 audit of the original codebase |
 | [docs/adr/](docs/adr/) | Architecture decision records |
+| [docs/PROVIDER_LICENSES.md](docs/PROVIDER_LICENSES.md) | Licence of every model and runtime, and why Piper is excluded |
 
 ## Status, stated plainly
 
-The architecture is complete and tested: **203 passed, 3 skipped** across unit,
-integration, contract, and smoke tiers.
+**238 tests pass, none skipped or fabricated**, across unit, integration,
+contract, and smoke tiers. Verified stable across consecutive runs.
 
-The three skips are `@pytest.mark.hardware` tests asserting that **no native
-inference backend is installed on this machine**. They report the truth rather
-than fabricating a pass.
+Local voice now works offline. On a machine with the GPU disabled, the network
+off and no Voicebox, `policy=cpu_only` selects `faster_whisper_cpu` +
+`kokoro_tts_cpu` and completes `real WAV → ASR → transcript → LLM → text → TTS →
+valid WAV`, with every stage genuinely measured:
 
-**There is currently no real local ASR or TTS implementation in the builtin
-provider set.** Every real speech provider is a remote compatibility adapter, so
-`cpu_only` produces a valid but degraded plan. Closing this is PHASE 2 — see
-[CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) for the full picture.
+| Stage | Provider | Median | RTF | Source |
+| --- | --- | --- | --- | --- |
+| ASR | `faster_whisper_cpu` (`base`, INT8) | 573.6 ms | 0.287 | measured |
+| TTS | `kokoro_tts_cpu` (`kokoro-v1.1-zh`) | 1101.5 ms | 0.337 | measured |
+| TTFA | end to end | 2077.8 ms | — | measured |
+
+Measured on the reference machine with `--policy cpu_only`. RTF below 1.0 means
+faster than real time; both stages clear it comfortably, which is what makes a
+CPU-only conversation practical rather than merely possible.
+
+**What is still missing, stated as plainly:** there is **no local LLM**, so an
+offline reply is deterministic stub text. The runtime hears and speaks through
+real local models and reasons from a template. There is deliberately no measured
+LLM latency above, because inventing one from a stub is exactly the dishonesty
+this project avoids. Both engines are also **single-pass** — no partial
+transcripts, no progressive audio — which sets the latency floor PHASE 3 has to
+attack. Cold start adds several seconds to load Kokoro's 325 MB graph and is not
+in the warm numbers above.
+
+Full detail, including what these numbers do *not* cover, in
+[BENCHMARKING.md](docs/BENCHMARKING.md) and
+[CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md).
 
 ## Quick start on Windows
 
@@ -126,15 +152,34 @@ Providers are registered, discovered, and selected — not configured by name in
 the code.
 
 - **LLM:** `ollama_llm` (Ollama or a compatible endpoint), `fake_llm`
-- **ASR:** `voicebox_asr` (Voicebox-compatible service exposing `/health`,
-  `/profiles`, `/transcribe`), `fake_asr`
-- **TTS:** `voicebox_tts` (Voicebox-compatible `/generate/stream`), `fake_tts`
+- **ASR:** `faster_whisper_cpu` (**local**, CPU INT8), `voicebox_asr`
+  (Voicebox-compatible `/health`, `/profiles`, `/transcribe`), `fake_asr`
+- **TTS:** `kokoro_tts_cpu` (**local**, 103 zh voices), `voicebox_tts`
+  (Voicebox-compatible `/generate/stream`), `fake_tts`
 - **VAD:** `fake_vad`
 - **Relay worker:** configured with `AI_RELAY_WS_URL` and `AI_RELAY_TOKEN`
 
 Copy `config.example.json` to `config.json` and adjust endpoints for your machine. Secrets are read from environment variables; do not commit tokens or machine-specific configuration.
 
-The compatibility providers are optional. Disable them and the runtime still
+The local providers need one extra step, and only one. They are **optional
+extras** — nothing is installed into the base environment, and nothing is
+downloaded on import:
+
+```powershell
+# CPU-only local speech (~530 MB of packages, no PyTorch, no CUDA runtime)
+pip install -r requirements-local.txt
+
+# Then fetch weights explicitly. Nothing downloads silently, ever.
+lvc models fetch
+lvc models list          # what is present, what is missing
+lvc doctor               # runtime, weights and Chinese G2P checks
+```
+
+Or take them one at a time with `requirements-local-asr.txt` and
+`requirements-local-tts.txt`. From here, `policy=cpu_only` works with the
+network switched off.
+
+The compatibility providers are optional too. Disable them and the runtime still
 starts, still plans, and still completes a turn with the fake providers — which
 is what makes the whole pipeline testable.
 
@@ -150,9 +195,9 @@ The adaptive runtime, gateway, browser UI, backend discovery, diagnostics, smoke
 test, and Godot sample are included. Actual speech quality and latency depend on
 the ASR/TTS models installed on the host machine.
 
-The runtime's own architecture is finished and tested. What it lacks is a real
-local speech engine — see [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) rather
-than taking this paragraph's word for it.
+Local hearing and speaking now work without network or GPU — see the status
+section above for the measured numbers, and
+[CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) for what is still missing.
 
 ## License
 
@@ -174,11 +219,24 @@ provider 地位相同。
 [开发状态](docs/DEVELOPMENT_STATUS.md)、[能力矩阵](docs/CAPABILITY_MATRIX.md)、
 [路线图](docs/ROADMAP.md)、[安全](docs/SECURITY.md)、[ADR](docs/adr/)。
 
-**当前状态（如实说明）**：架构已完成，测试 `203 passed, 3 skipped`。跳过的是
-`@pytest.mark.hardware` 标记的用例——它们断言本机没有安装原生推理后端，如实报告而不是伪造通过。
+**当前状态（如实说明）**：测试 `238 passed`，无跳过、无伪造通过，连续运行结果稳定。
 
-**内置 provider 中目前还没有真正可用的本地 ASR / TTS**，真实的语音能力都来自远程兼容
-适配器，因此 `cpu_only` 只能给出降级方案。补齐这一环是 PHASE 2 的目标。
+**本地语音已真正可用（离线、纯 CPU）**：在没有 GPU、没有网络、没有 Voicebox 的机器上，
+`policy=cpu_only` 会选中 `faster_whisper_cpu` 与 `kokoro_tts_cpu`，完成
+`真实 WAV → ASR → 文本 → LLM → 文本 → TTS → 合法 WAV` 全链路，且每个阶段都是**实测**
+而非估算：ASR 中位 573.6 ms（RTF 0.287）、TTS 中位 1101.5 ms（RTF 0.337）、TTFA
+2077.8 ms。
+
+需要额外安装一次（不会影响基础安装体积，也不会在导入时偷偷下载模型）：
+
+```powershell
+pip install -r requirements-local.txt
+lvc models fetch
+```
+
+**仍需如实说明的缺口**：没有本地 LLM，离线回合的回复仍是确定性占位文本——它真的在听、
+真的在说，但还不能真的思考；两个引擎都是单趟推理，没有流式部分结果，因此延迟存在下限；
+冷启动加载 Kokoro 的 325 MB 图需要数秒，未计入上文的 warm 数字。
 
 Windows 首次使用可运行 `setup.ps1`，之后使用 `start.ps1`；后端或麦克风未识别时运行
 `doctor.ps1`。打开 `http://127.0.0.1:17831` 即可使用。新的自适应运行时可加 `--runtime`

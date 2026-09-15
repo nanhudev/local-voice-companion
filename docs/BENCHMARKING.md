@@ -23,7 +23,7 @@ number from an invented one and therefore cannot tell when the guess is wrong.
 ## Cache key
 
 ```
-hardware fingerprint × provider id × model id × device
+hardware fingerprint × provider id × model id × device × provider version
 ```
 
 The hardware fingerprint is a stable hash over CPU model, thread count, memory,
@@ -32,6 +32,17 @@ that device is invalidated automatically, because the key no longer matches.
 
 This is why `fingerprint` appears in `GET /api/v1/system/profile`: every cached
 number is traceable to the machine that produced it.
+
+**The version term was added after it was noticed to be missing.** A benchmark
+measures one specific build, but the key ignored which build. Providers that
+reported a hardcoded `"1.0.0"` therefore made invalidation *look* implemented
+while guaranteeing that an upgraded engine would keep serving the previous
+engine's numbers. The native providers now report their real installed version —
+`faster-whisper` from distribution metadata, and Kokoro as a composite of
+`kokoro-onnx`, `onnxruntime` and `misaki`, since synthesis depends on all three.
+Reads go through `importlib.metadata`, which does not import the heavy package
+and costs ~1–6 ms, so `descriptor()` stays cheap enough to call in the selector's
+hot path.
 
 ## What is measured
 
@@ -61,23 +72,64 @@ limited.** Presenting a three-significant-figure latency derived from a
 ## Running a benchmark
 
 ```
-POST /api/v1/benchmark
+lvc benchmark --policy cpu_only            # human-readable
+lvc benchmark --policy cpu_only --json     # machine-readable
 ```
+
+Each stage is run once as warmup (loading weights, priming caches) and then
+`runs` times, defaulting to three. The reported value is the **median**, with
+min and max alongside — the median because outlier suppression matters on a
+shared OS, and min/max because a median alone hides jitter that a user will
+still hear.
 
 On a machine with no local backend, the honest result is `SIMULATED` — the
 runtime has the provider's declared resources and no observation of its own.
 That is a correct answer. The incorrect answers are refusing to return anything
 and returning a fabricated `MEASURED`.
 
-## Current state
+## Current state — measured
 
-**The instrumentation is complete and the measurements are not.** Every stage is
-timed on every turn; no real model has been timed on this hardware, because none
-is installed (see `CAPABILITY_MATRIX.md`).
+The instrumentation is complete **and** real models are now timed on real
+hardware. Both stages below are `MEASURED`, not estimated.
 
-Consequently the selection engine currently scores against largely simulated
-input. The structured breakdown is real; the numbers inside it are informed
-estimates. Replacing them is the first task of PHASE 2.
+### Reference machine
 
-Anyone reading a selection result should check the source field before treating
-the ranking as evidence.
+| | |
+|---|---|
+| CPU | 12 threads |
+| Memory | 16,280 MB |
+| GPU | RTX 2070, 8,192 MB (disabled for these runs) |
+| Accelerators | `cuda`, `directml` |
+| Fingerprint | `d7fc5fcfb3419e08` |
+| Disk caution | system drive was under 2 GB free; models live on another volume |
+
+### Results — `policy=cpu_only`, GPU disabled, 1 warmup + 3 runs
+
+| Stage | Provider | Model | Median | Min | Max | RTF | Source |
+|---|---|---|---|---|---|---|---|
+| ASR | `faster_whisper_cpu` | `base`, INT8 | **573.6 ms** | 567.8 | 581.3 | 0.287 | measured |
+| TTS | `kokoro_tts_cpu` | `kokoro-v1.1-zh` | **1101.5 ms** | 1078.8 | 1110.8 | 0.337 | measured |
+| TTFA | end to end | — | **2077.8 ms** | — | — | — | measured |
+
+RTF is *synthesis/recognition time ÷ produced audio duration*, so **below 1.0
+means faster than real time** — both stages comfortably clear that, which is what
+makes a CPU-only conversational loop practical rather than merely possible.
+
+**What the numbers do and do not cover.** They are single-turn, single-speaker,
+short-utterance measurements on one machine. They say nothing about sustained
+load about behaviour with concurrent requests. The 2.08 s TTFA includes load-free
+steady-state inference; a cold start adds model loading (several seconds for
+Kokoro's 325 MB graph) and is not represented here.
+
+Numbers in this table come from a generated report, not from memory. Refresh it
+by running the command above.
+
+## Gaps still open
+
+* **No LLM stage is measured.** Offline the honest default is deterministic stub
+  text, which has no latency worth reporting. A measured LLM number requires a
+  local LLM that is actually installed, and none is — see
+  `CAPABILITY_MATRIX.md`.
+* **Cold-start cost is not benchmarked.** Only warm-turn latency is.
+* **No streaming.** Both native providers are single-pass by design
+  (ADR-0007), so TTFA cannot come below a full ASR-plus-synthesis pass yet.

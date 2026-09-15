@@ -43,6 +43,7 @@ api/          HTTP + WebSocket surface          depends on everything below
 core/         runtime state, sessions, turn orchestration, events
 selection/    candidate → constraint → score → decision
 providers/    the provider contract and its implementations
+  local/        native in-process inference (ASR + TTS)
 hardware/     machine probing and the hardware profile
 pipeline/     chunking, queues, WAV assembly
 bots/         portable bot manifests
@@ -55,6 +56,25 @@ observability/ metrics
 provider. `hardware/` imports nothing from the runtime. This is what makes
 `FakeASR → FakeLLM → FakeTTS` a real test of the runtime rather than a mock of
 it — the fakes go through the identical code path as real engines.
+
+### The native provider tier
+
+`providers/local/` holds providers that run inference inside this process:
+`faster_whisper_cpu` and `kokoro_tts_cpu`. They reach the runtime through the
+same registration path as the fakes, and the selection engine contains no
+special case for them — which is the point. Adding a local engine changed
+`register_builtin_providers` and nothing above it.
+
+Three properties distinguish this tier, and all three are load-bearing:
+
+* **Nothing downloads implicitly.** `ModelStore` raises `ModelMissing` naming
+  the exact command that fixes it. A probe never opens a socket.
+* **Heavy imports are lazy and per-method.** Importing `local_voice_companion`
+  pulls in neither onnxruntime nor CTranslate2, so startup stays fast and a
+  machine without those packages still imports cleanly.
+* **Blocking inference is offloaded.** Vocoder work runs in a worker thread via
+  `asyncio.to_thread`, raced against the cancellation token, so a long synthesis
+  cannot stall the event loop or outlive a barge-in.
 
 ## 3. The provider contract
 
