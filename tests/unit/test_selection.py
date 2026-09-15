@@ -24,6 +24,7 @@ from local_voice_companion.providers.base import (
 )
 from local_voice_companion.providers.fake import FakeASR, FakeLLM, FakeTTS, FakeVAD
 from local_voice_companion.selection.benchmark import (
+    BenchmarkCache,
     BenchmarkSource,
     estimate_metrics,
     is_stub,
@@ -283,6 +284,77 @@ class TestBenchmarkHonesty:
         candidate = Candidate("llm-api", ProviderKind.LLM, "m", Device.REMOTE.value, descriptor)
         load, _, _ = estimate_metrics(candidate, synthetic_profile)
         assert load == 0
+
+
+class TestBenchmarkCache:
+    """A cached number is a claim about one machine *and* one build.
+
+    Both halves matter. The fingerprint half is obvious; the version half is
+    what makes a plan honest after an upgrade.
+    """
+
+    def _candidate(self, provider_id: str = "asr", version: str | None = "1.0.0", **kwargs):
+        descriptor = _descriptor(provider_id, ProviderKind.ASR, **kwargs)
+        object.__setattr__(descriptor, "version", version)
+        return Candidate(provider_id, ProviderKind.ASR, "m", Device.CPU.value, descriptor)
+
+    def test_a_version_bump_invalidates_the_entry(self, synthetic_profile, tmp_path) -> None:
+        cache = BenchmarkCache(path=tmp_path / "bench.json")
+        profile = synthetic_profile
+        fingerprint = "fp-A"
+
+        old = self._candidate(version="0.6.1")
+        old_result = simulate_benchmark(old, profile)
+        cache.put(fingerprint, old, old_result)
+        cache.flush()
+
+        upgraded = self._candidate(version="0.7.0")
+        assert cache.get(fingerprint, upgraded) is None, (
+            "an upgraded engine must not inherit the previous build's numbers"
+        )
+        assert cache.get(fingerprint, old) is not None, "the old entry itself is intact"
+
+    def test_the_same_version_hits_the_entry(self, synthetic_profile, tmp_path) -> None:
+        cache = BenchmarkCache(path=tmp_path / "bench.json")
+        candidate = self._candidate(version="1.2.1")
+        cache.put("fp-A", candidate, simulate_benchmark(candidate, synthetic_profile))
+        again = self._candidate(version="1.2.1")
+        assert cache.get("fp-A", again) is not None
+
+    def test_a_fingerprint_change_invalidates_the_entry(
+        self, synthetic_profile, tmp_path
+    ) -> None:
+        cache = BenchmarkCache(path=tmp_path / "bench.json")
+        candidate = self._candidate()
+        cache.put("fp-A", candidate, simulate_benchmark(candidate, synthetic_profile))
+        assert cache.get("fp-B", self._candidate()) is None
+
+    def test_a_missing_version_still_keys_stably(self, tmp_path) -> None:
+        """`version` is optional on a descriptor; absent is not fatal."""
+
+        cache = BenchmarkCache(path=tmp_path / "bench.json")
+        plain = self._candidate(version=None)
+        key_twice = cache._key("fp", plain) == cache._key("fp", plain)
+        assert key_twice
+        assert cache._key("fp", self._candidate(version="1")) != cache._key("fp", plain)
+
+    def test_flush_round_trips_through_disk(self, synthetic_profile, tmp_path) -> None:
+        path = tmp_path / "bench.json"
+        first = BenchmarkCache(path=path)
+        candidate = self._candidate()
+        first.put("fp-A", candidate, simulate_benchmark(candidate, synthetic_profile))
+        first.flush()
+
+        second = BenchmarkCache(path=path)
+        assert second.get("fp-A", self._candidate()) is not None
+
+    def test_a_corrupt_cache_file_degrades_to_miss(self, tmp_path) -> None:
+        """A read-only or corrupted cache must not break selection."""
+
+        path = tmp_path / "bench.json"
+        path.write_text("{not json", encoding="utf-8")
+        cache = BenchmarkCache(path=path)
+        assert cache.get("fp-A", self._candidate()) is None
 
 
 class TestScoring:
