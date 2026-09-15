@@ -5,11 +5,12 @@ Pipeline:  descriptor -> candidate -> constraint check -> benchmark -> score
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from ..core.types import (
-    Device,
     Device,
     ProviderKind,
     SelectionPolicy,
@@ -196,13 +197,48 @@ def constraints_from(
 
 
 def expand_devices(descriptor: ProviderDescriptor, allowed: Sequence[str]) -> list[str]:
-    """Every device this descriptor can actually use on this machine."""
+    """Every device this descriptor can actually use on this machine.
+
+    Returning an empty list means the provider is excluded by the device policy
+    before it is ever scored. That silent exclusion was a real explainability
+    hole: a `remote`-only provider under `cpu_only` vanished from the plan with
+    nothing recorded in the rejection log, so the UI could only say "no ASR
+    provider available" without saying why.
+
+    The caller (`generate_candidates`) now records that case explicitly.
+    """
 
     devices = [device.value for device in descriptor.devices]
     ordered = [device for device in allowed if device in devices]
     if Device.CPU.value in devices and Device.CPU.value not in ordered:
         ordered.append(Device.CPU.value)
     return ordered
+
+
+#: Human-readable explanation for a device that the policy excluded.
+_DEVICE_REASONS: dict[str, str] = {
+    "remote": "it is an HTTP-backed service on a remote device, which policy excludes",
+    "cuda": "CUDA is not permitted by the current policy",
+    "directml": "DirectML is not permitted by the current policy",
+    "metal": "Metal is not permitted by the current policy",
+    "rocm": "ROCm is not permitted by the current policy",
+    "vulkan": "Vulkan is not permitted by the current policy",
+}
+
+
+def explain_device_exclusion(
+    descriptor: ProviderDescriptor, allowed: Sequence[str]
+) -> str:
+    """Why this descriptor has no usable device under `allowed`."""
+
+    devices = [device.value for device in descriptor.devices]
+    if not devices:
+        return "the provider declares no devices at all"
+    blocked = [device for device in devices if device not in allowed]
+    if not blocked:
+        return "no usable device"
+    reasons = [_DEVICE_REASONS.get(device, f"device {device} is not allowed") for device in blocked]
+    return f"{', '.join(blocked)} excluded because {reasons[0]}"
 
 
 def generate_candidates(
@@ -218,7 +254,22 @@ def generate_candidates(
         if descriptor.kind not in kinds:
             continue
         models = descriptor.models or (descriptor.id,)
-        for device in expand_devices(descriptor, constraints.allowed_devices):
+        devices = expand_devices(descriptor, constraints.allowed_devices)
+        if not devices:
+            # Record the exclusion, otherwise the provider simply disappears and
+            # the decision log cannot explain the gap to the user.
+            _record_rejection(
+                Candidate(
+                    provider_id=descriptor.id,
+                    kind=descriptor.kind,
+                    model_id=descriptor.id,
+                    device="(none)",
+                    descriptor=descriptor,
+                ),
+                explain_device_exclusion(descriptor, constraints.allowed_devices),
+            )
+            continue
+        for device in devices:
             for model in models:
                 model_id = model.id if hasattr(model, "id") else str(model)
                 candidate = Candidate(
@@ -236,16 +287,61 @@ def generate_candidates(
     return candidates
 
 
-_REJECTIONS: list[dict[str, str]] = []
+#: Rejections live in a `ContextVar`, not a module global.
+#:
+#: A module-level list is process-wide state with two real consequences: a
+#: concurrent `recommend()` in another task drains *this* task's rejections, and
+#: anything that clears the log (`take_rejections`) between candidate generation
+#: and decision building silently erases the explanation. A `ContextVar` keeps
+#: the log correct per task, which is what "explain this decision" means.
+_REJECTIONS: ContextVar[list[dict[str, str]]] = ContextVar("lvc_rejections")
+
+
+def _rejection_log() -> list[dict[str, str]]:
+    """The current task's rejection log, created on first use."""
+
+    log = _REJECTIONS.get(None)
+    if log is None:
+        log = []
+        _REJECTIONS.set(log)
+    return log
 
 
 def _record_rejection(candidate: Candidate, reason: str) -> None:
-    _REJECTIONS.append({"candidate": candidate.id, "reason": reason})
+    _rejection_log().append({"candidate": candidate.id, "reason": reason})
+
+
+def peek_rejections() -> list[dict[str, str]]:
+    """Read the log without draining it."""
+
+    return list(_rejection_log())
 
 
 def take_rejections() -> list[dict[str, str]]:
-    """Drain the rejection log (used to explain decisions in the UI)."""
+    """Drain the current task's rejection log.
 
-    snapshot = list(_REJECTIONS)
-    _REJECTIONS.clear()
+    Draining is correct *between* decisions (each decision owns its own
+    explanations), but the caller must not drain in the middle of building one.
+    """
+
+    log = _rejection_log()
+    snapshot = list(log)
+    log.clear()
     return snapshot
+
+
+@contextmanager
+def collecting_rejections() -> Iterator[list[dict[str, str]]]:
+    """Collect every rejection raised inside the block into one list.
+
+    Use this around a whole decision rather than calling `take_rejections()` at
+    the end: the sequence "generate candidates, then score them" can raise
+    rejections at either stage, and only the caller knows it owns both.
+    """
+
+    collected: list[dict[str, str]] = []
+    token = _REJECTIONS.set(collected)
+    try:
+        yield collected
+    finally:
+        _REJECTIONS.reset(token)

@@ -15,7 +15,14 @@ from ..providers.base import ProviderDescriptor
 from ..providers.discovery import discover
 from ..providers.registry import ProviderRegistry, registry
 from .benchmark import BenchmarkCache, simulate_benchmark
-from .candidates import Candidate, constraints_from, generate_candidates, take_rejections
+from .candidates import (
+    Candidate,
+    _record_rejection,
+    collecting_rejections,
+    constraints_from,
+    generate_candidates,
+    take_rejections,
+)
 from .policies import resolve_policy, weights_for
 from .scoring import ScoredCandidate, rank, score_candidate
 from .selector import PipelineResourcePlanner, SelectionDecision
@@ -107,60 +114,92 @@ async def recommend(
 
     probe_results = await discover(reg, options_by_id=_provider_options(config, reg))
     available = {item.provider_id for item in probe_results if item.available}
-    descriptors = [
-        reg.registration(provider_id).descriptor
-        for provider_id in sorted(available)
-        if reg.registration(provider_id).descriptor.id in available
-    ]
+    probe_detail = {
+        item.provider_id: item.detail for item in probe_results if not item.available
+    }
+
+    # Candidates come from *every* registered provider, not only the reachable
+    # ones. Filtering by availability first has a subtle and harmful effect: a
+    # provider that is merely down (Voicebox stopped, Ollama not running) never
+    # reaches the constraint check, so it is absent from the plan with no
+    # recorded reason -- and the user cannot tell "not installed" from
+    # "excluded by policy". Generating from the full set lets each provider earn
+    # an explicit rejection instead of a silent omission.
+    descriptors = [reg.registration(provider_id).descriptor for provider_id in reg.ids()]
 
     fingerprint = profile.fingerprint()
-    candidates = generate_candidates(descriptors, profile, constraints, kinds=KIND_ORDER)
-    candidates = list(_apply_manual_overrides(candidates, config.providers, language))
 
-    ram_budget = constraints.max_ram_mb
-    vram_budget = constraints.max_vram_mb
+    # Everything from candidate generation onwards belongs to *this* decision,
+    # so its rejections are collected as a unit. Draining at the end instead
+    # loses the explanation whenever anything in between touches the log.
+    with collecting_rejections() as rejections:
+        candidates = generate_candidates(descriptors, profile, constraints, kinds=KIND_ORDER)
+        candidates = list(_apply_manual_overrides(candidates, config.providers, language))
 
-    ranked_by_kind: dict[str, list[ScoredCandidate]] = {}
-    considered = 0
-    for kind in KIND_ORDER:
-        scored_items: list[ScoredCandidate] = []
+        # A provider can pass the constraint check and still not be installable.
+        # Record that here so the plan distinguishes "down right now" from
+        # "rejected by policy"; both reasons are user-facing.
         for candidate in candidates:
-            if candidate.kind is not kind:
+            if candidate.provider_id in available:
                 continue
-            considered += 1
-            result = cache.get(fingerprint, candidate) or simulate_benchmark(candidate, profile)
-            if cache.get(fingerprint, candidate) is None:
-                cache.put(fingerprint, candidate, result)
-            breakdown = score_candidate(
+            _record_rejection(
                 candidate,
-                result,
-                profile,
-                weights=weights,
-                language=language,
-                ram_budget_mb=ram_budget,
-                vram_budget_mb=vram_budget,
+                "provider is not reachable right now: "
+                + (probe_detail.get(candidate.provider_id) or "probe reported unavailable"),
             )
-            scored_items.append(
-                ScoredCandidate(
-                    candidate=candidate,
-                    benchmark=result,
-                    score=breakdown,
-                    quality_source=candidate.descriptor.quality_source.value
-                    if candidate.descriptor.quality_score is not None
-                    else "quality_tier_ordinal",
-                )
-            )
-        if scored_items:
-            ranked_by_kind[kind.value] = rank(scored_items)
 
-    planner = PipelineResourcePlanner(ram_budget_mb=ram_budget, vram_budget_mb=vram_budget)
-    plan = planner.plan(ranked_by_kind)
-    missing = [kind.value for kind in REQUIRED_KINDS if kind.value not in plan.assignments]
-    if missing:
-        plan.feasible = False
-        plan.notes.append(
-            "no available provider for: " + ", ".join(missing) + "; install a local provider or configure an API provider"
+        ram_budget = constraints.max_ram_mb
+        vram_budget = constraints.max_vram_mb
+
+        ranked_by_kind: dict[str, list[ScoredCandidate]] = {}
+        considered = 0
+        for kind in KIND_ORDER:
+            scored_items: list[ScoredCandidate] = []
+            for candidate in candidates:
+                if candidate.kind is not kind:
+                    continue
+                if candidate.provider_id not in available:
+                    # It already has its rejection recorded above; scoring it
+                    # would let a dead service win the plan.
+                    continue
+                considered += 1
+                result = cache.get(fingerprint, candidate) or simulate_benchmark(candidate, profile)
+                if cache.get(fingerprint, candidate) is None:
+                    cache.put(fingerprint, candidate, result)
+                breakdown = score_candidate(
+                    candidate,
+                    result,
+                    profile,
+                    weights=weights,
+                    language=language,
+                    ram_budget_mb=ram_budget,
+                    vram_budget_mb=vram_budget,
+                )
+                scored_items.append(
+                    ScoredCandidate(
+                        candidate=candidate,
+                        benchmark=result,
+                        score=breakdown,
+                        quality_source=candidate.descriptor.quality_source.value
+                        if candidate.descriptor.quality_score is not None
+                        else "quality_tier_ordinal",
+                    )
+                )
+            if scored_items:
+                ranked_by_kind[kind.value] = rank(scored_items)
+
+        planner = PipelineResourcePlanner(
+            ram_budget_mb=ram_budget, vram_budget_mb=vram_budget
         )
+        plan = planner.plan(ranked_by_kind)
+        missing = [kind.value for kind in REQUIRED_KINDS if kind.value not in plan.assignments]
+        if missing:
+            plan.feasible = False
+            plan.notes.append(
+                "no available provider for: "
+                + ", ".join(missing)
+                + "; install a local provider or configure an API provider"
+            )
 
     cache.flush()
 
@@ -171,7 +210,7 @@ async def recommend(
         policy_reason=policy_reason,
         plan=plan,
         candidates_considered=considered,
-        rejected=take_rejections(),
+        rejected=list(rejections),
         alternatives={
             kind: [item.to_dict() for item in options[:4]]
             for kind, options in ranked_by_kind.items()
@@ -221,41 +260,42 @@ async def recommend_from_descriptors(
     constraints = constraints_from(
         profile, effective, language=language, allow_network_llm=allow_network, cpu_only=cpu_only
     )
-    candidates = generate_candidates(descriptors, profile, constraints, kinds=KIND_ORDER)
+    with collecting_rejections() as rejections:
+        candidates = generate_candidates(descriptors, profile, constraints, kinds=KIND_ORDER)
 
-    ranked_by_kind: dict[str, list[ScoredCandidate]] = {}
-    considered = 0
-    for kind in KIND_ORDER:
-        scored_items: list[ScoredCandidate] = []
-        for candidate in candidates:
-            if candidate.kind is not kind:
-                continue
-            considered += 1
-            result = simulate_benchmark(candidate, profile)
-            breakdown = score_candidate(
-                candidate,
-                result,
-                profile,
-                weights=weights,
-                language=language,
-                ram_budget_mb=constraints.max_ram_mb,
-                vram_budget_mb=constraints.max_vram_mb,
-            )
-            scored_items.append(
-                ScoredCandidate(
-                    candidate=candidate,
-                    benchmark=result,
-                    score=breakdown,
-                    quality_source=candidate.descriptor.quality_source.value,
+        ranked_by_kind: dict[str, list[ScoredCandidate]] = {}
+        considered = 0
+        for kind in KIND_ORDER:
+            scored_items: list[ScoredCandidate] = []
+            for candidate in candidates:
+                if candidate.kind is not kind:
+                    continue
+                considered += 1
+                result = simulate_benchmark(candidate, profile)
+                breakdown = score_candidate(
+                    candidate,
+                    result,
+                    profile,
+                    weights=weights,
+                    language=language,
+                    ram_budget_mb=constraints.max_ram_mb,
+                    vram_budget_mb=constraints.max_vram_mb,
                 )
-            )
-        if scored_items:
-            ranked_by_kind[kind.value] = rank(scored_items)
+                scored_items.append(
+                    ScoredCandidate(
+                        candidate=candidate,
+                        benchmark=result,
+                        score=breakdown,
+                        quality_source=candidate.descriptor.quality_source.value,
+                    )
+                )
+            if scored_items:
+                ranked_by_kind[kind.value] = rank(scored_items)
 
-    planner = PipelineResourcePlanner(
-        ram_budget_mb=constraints.max_ram_mb, vram_budget_mb=constraints.max_vram_mb
-    )
-    plan = planner.plan(ranked_by_kind)
+        planner = PipelineResourcePlanner(
+            ram_budget_mb=constraints.max_ram_mb, vram_budget_mb=constraints.max_vram_mb
+        )
+        plan = planner.plan(ranked_by_kind)
 
     return SelectionDecision(
         profile_fingerprint=profile.fingerprint(),
@@ -264,7 +304,7 @@ async def recommend_from_descriptors(
         policy_reason=reason,
         plan=plan,
         candidates_considered=considered,
-        rejected=take_rejections(),
+        rejected=list(rejections),
         alternatives={
             kind: [item.to_dict() for item in options[:4]] for kind, options in ranked_by_kind.items()
         },

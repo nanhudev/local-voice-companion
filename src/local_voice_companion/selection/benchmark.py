@@ -272,7 +272,19 @@ class BenchmarkCache:
 
     @staticmethod
     def _key(fingerprint: str, candidate: Candidate) -> str:
-        return "|".join([fingerprint, candidate.provider_id, candidate.model_id, candidate.device])
+        """Everything a cached number is conditional on.
+
+        The provider *version* belongs in the key for the same reason the
+        hardware fingerprint does: a benchmark measures one specific build.
+        Without it, upgrading kokoro-onnx 0.6.1 -> 0.7.0 would keep serving the
+        old machine's numbers for the new engine, and the plan would be built on
+        a measurement that no longer describes anything real.
+        """
+
+        version = getattr(candidate.descriptor, "version", None) or "-"
+        return "|".join(
+            [fingerprint, candidate.provider_id, candidate.model_id, candidate.device, version]
+        )
 
     @staticmethod
     def _from_payload(payload: dict[str, Any]) -> BenchmarkResult:
